@@ -375,14 +375,44 @@ tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvWindowDefault , arg2);\
 
 
 /*----------------------------------------------------------
-// Decoder Ring for SettingDumpStreamRecvBufferDefault
-// [sett] StreamRecvBufferDefault= %u
-// QuicTraceLogVerbose(SettingDumpStreamRecvBufferDefault, "[sett] StreamRecvBufferDefault= %u", Settings->StreamRecvBufferDefault);
-// arg2 = arg2 = Settings->StreamRecvBufferDefault = arg2
+// Decoder Ring for SettingDumpStreamRecvWindowBidiLocalDefault
+// [sett] StreamRecvWindowBidiLocalDefault  = %u
+// QuicTraceLogVerbose(SettingDumpStreamRecvWindowBidiLocalDefault,  "[sett] StreamRecvWindowBidiLocalDefault  = %u", Settings->StreamRecvWindowBidiLocalDefault);
+// arg2 = arg2 = Settings->StreamRecvWindowBidiLocalDefault = arg2
 ----------------------------------------------------------*/
-#ifndef _clog_3_ARGS_TRACE_SettingDumpStreamRecvBufferDefault
-#define _clog_3_ARGS_TRACE_SettingDumpStreamRecvBufferDefault(uniqueId, encoded_arg_string, arg2)\
-tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvBufferDefault , arg2);\
+#ifndef _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowBidiLocalDefault
+#define _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowBidiLocalDefault(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvWindowBidiLocalDefault , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingDumpStreamRecvWindowBidiRemoteDefault
+// [sett] StreamRecvWindowBidiRemoteDefault = %u
+// QuicTraceLogVerbose(SettingDumpStreamRecvWindowBidiRemoteDefault, "[sett] StreamRecvWindowBidiRemoteDefault = %u", Settings->StreamRecvWindowBidiRemoteDefault);
+// arg2 = arg2 = Settings->StreamRecvWindowBidiRemoteDefault = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowBidiRemoteDefault
+#define _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowBidiRemoteDefault(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvWindowBidiRemoteDefault , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingDumpStreamRecvWindowUnidiDefault
+// [sett] StreamRecvWindowUnidiDefault      = %u
+// QuicTraceLogVerbose(SettingDumpStreamRecvWindowUnidiDefault,      "[sett] StreamRecvWindowUnidiDefault      = %u", Settings->StreamRecvWindowUnidiDefault);
+// arg2 = arg2 = Settings->StreamRecvWindowUnidiDefault = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowUnidiDefault
+#define _clog_3_ARGS_TRACE_SettingDumpStreamRecvWindowUnidiDefault(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvWindowUnidiDefault , arg2);\
 
 #endif
 
@@ -678,6 +708,66 @@ tracepoint(CLOG_SETTINGS_C, SettingEcnEnabled , arg2);\
 
 
 /*----------------------------------------------------------
+// Decoder Ring for SettingHyStartEnabled
+// [sett] HyStartEnabled         = %hhu
+// QuicTraceLogVerbose(SettingHyStartEnabled,              "[sett] HyStartEnabled         = %hhu", Settings->HyStartEnabled);
+// arg2 = arg2 = Settings->HyStartEnabled = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingHyStartEnabled
+#define _clog_3_ARGS_TRACE_SettingHyStartEnabled(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingHyStartEnabled , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingEncryptionOffloadAllowed
+// [sett] EncryptionOffloadAllowed = %hhu
+// QuicTraceLogVerbose(SettingEncryptionOffloadAllowed,    "[sett] EncryptionOffloadAllowed = %hhu", Settings->EncryptionOffloadAllowed);
+// arg2 = arg2 = Settings->EncryptionOffloadAllowed = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingEncryptionOffloadAllowed
+#define _clog_3_ARGS_TRACE_SettingEncryptionOffloadAllowed(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingEncryptionOffloadAllowed , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingReliableResetEnabled
+// [sett] ReliableResetEnabled   = %hhu
+// QuicTraceLogVerbose(SettingReliableResetEnabled,        "[sett] ReliableResetEnabled   = %hhu", Settings->ReliableResetEnabled);
+// arg2 = arg2 = Settings->ReliableResetEnabled = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingReliableResetEnabled
+#define _clog_3_ARGS_TRACE_SettingReliableResetEnabled(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingReliableResetEnabled , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingOneWayDelayEnabled
+// [sett] OneWayDelayEnabled     = %hhu
+// QuicTraceLogVerbose(SettingOneWayDelayEnabled,          "[sett] OneWayDelayEnabled     = %hhu", Settings->OneWayDelayEnabled);
+// arg2 = arg2 = Settings->OneWayDelayEnabled = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingOneWayDelayEnabled
+#define _clog_3_ARGS_TRACE_SettingOneWayDelayEnabled(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingOneWayDelayEnabled , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for SettingDumpLFixedServerID
 // [sett] FixedServerID          = %u
 // QuicTraceLogVerbose(SettingDumpLFixedServerID,              "[sett] FixedServerID          = %u", Settings->FixedServerID);
@@ -686,6 +776,21 @@ tracepoint(CLOG_SETTINGS_C, SettingEcnEnabled , arg2);\
 #ifndef _clog_3_ARGS_TRACE_SettingDumpLFixedServerID
 #define _clog_3_ARGS_TRACE_SettingDumpLFixedServerID(uniqueId, encoded_arg_string, arg2)\
 tracepoint(CLOG_SETTINGS_C, SettingDumpLFixedServerID , arg2);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingDumpStreamRecvBufferDefault
+// [sett] StreamRecvBufferDefault= %u
+// QuicTraceLogVerbose(SettingDumpStreamRecvBufferDefault,     "[sett] StreamRecvBufferDefault= %u", Settings->StreamRecvBufferDefault);
+// arg2 = arg2 = Settings->StreamRecvBufferDefault = arg2
+----------------------------------------------------------*/
+#ifndef _clog_3_ARGS_TRACE_SettingDumpStreamRecvBufferDefault
+#define _clog_3_ARGS_TRACE_SettingDumpStreamRecvBufferDefault(uniqueId, encoded_arg_string, arg2)\
+tracepoint(CLOG_SETTINGS_C, SettingDumpStreamRecvBufferDefault , arg2);\
 
 #endif
 

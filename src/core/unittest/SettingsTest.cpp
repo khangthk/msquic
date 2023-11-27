@@ -89,6 +89,9 @@ TEST(SettingsTest, TestAllSettingsFieldsSet)
     SETTINGS_FEATURE_SET_TEST(TlsClientMaxSendBuffer, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(TlsServerMaxSendBuffer, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(StreamRecvWindowDefault, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(StreamRecvWindowBidiLocalDefault, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(StreamRecvWindowBidiRemoteDefault, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(StreamRecvWindowUnidiDefault, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(StreamRecvBufferDefault, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(ConnFlowControlWindow, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(MaxWorkerQueueDelayUs, QuicSettingsSettingsToInternal);
@@ -116,6 +119,10 @@ TEST(SettingsTest, TestAllSettingsFieldsSet)
     SETTINGS_FEATURE_SET_TEST(DestCidUpdateIdleTimeoutMs, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(GreaseQuicBitEnabled, QuicSettingsSettingsToInternal);
     SETTINGS_FEATURE_SET_TEST(EcnEnabled, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(HyStartEnabled, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(EncryptionOffloadAllowed, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(ReliableResetEnabled, QuicSettingsSettingsToInternal);
+    SETTINGS_FEATURE_SET_TEST(OneWayDelayEnabled, QuicSettingsSettingsToInternal);
 
     Settings.IsSetFlags = 0;
     Settings.IsSet.RESERVED = ~Settings.IsSet.RESERVED;
@@ -166,6 +173,9 @@ TEST(SettingsTest, TestAllSettingsFieldsGet)
     SETTINGS_FEATURE_GET_TEST(TlsClientMaxSendBuffer, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(TlsServerMaxSendBuffer, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(StreamRecvWindowDefault, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(StreamRecvWindowBidiLocalDefault, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(StreamRecvWindowBidiRemoteDefault, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(StreamRecvWindowUnidiDefault, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(StreamRecvBufferDefault, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(ConnFlowControlWindow, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(MaxWorkerQueueDelayUs, QuicSettingsGetSettings);
@@ -193,6 +203,10 @@ TEST(SettingsTest, TestAllSettingsFieldsGet)
     SETTINGS_FEATURE_GET_TEST(DestCidUpdateIdleTimeoutMs, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(GreaseQuicBitEnabled, QuicSettingsGetSettings);
     SETTINGS_FEATURE_GET_TEST(EcnEnabled, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(HyStartEnabled, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(EncryptionOffloadAllowed, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(ReliableResetEnabled, QuicSettingsGetSettings);
+    SETTINGS_FEATURE_GET_TEST(OneWayDelayEnabled, QuicSettingsGetSettings);
 
     Settings.IsSetFlags = 0;
     Settings.IsSet.RESERVED = ~Settings.IsSet.RESERVED;
@@ -213,6 +227,83 @@ TEST(SettingsTest, TestAllGlobalSettingsFieldsGet)
     Settings.IsSetFlags = 0;
     Settings.IsSet.RESERVED = ~Settings.IsSet.RESERVED;
     ASSERT_EQ(FieldCount, (sizeof(Settings.IsSetFlags) * 8) - PopCount(Settings.IsSetFlags));
+}
+
+TEST(SettingsTest, StreamRecvWindowDefaultSetsIndividualLimits)
+{
+    QUIC_SETTINGS_INTERNAL Source;
+    QUIC_SETTINGS_INTERNAL Destination;
+    CxPlatZeroMemory(&Source, sizeof(Source));
+    CxPlatZeroMemory(&Destination, sizeof(Destination));
+
+    const uint32_t Limit = 1024;
+
+    Source.IsSet.StreamRecvWindowDefault = 1;
+    Source.StreamRecvWindowDefault = Limit;
+
+    ASSERT_TRUE(QuicSettingApply(&Destination, TRUE, TRUE, &Source));
+
+    ASSERT_EQ(Destination.StreamRecvWindowDefault, Limit);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiLocalDefault, Limit);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiRemoteDefault, Limit);
+    ASSERT_EQ(Destination.StreamRecvWindowUnidiDefault, Limit);
+}
+
+TEST(SettingsTest, StreamRecvWindowDefaultDoesNotOverrideIndividualLimitsWhenSetAtDestination)
+{
+    QUIC_SETTINGS_INTERNAL Source;
+    QUIC_SETTINGS_INTERNAL Destination;
+    CxPlatZeroMemory(&Source, sizeof(Source));
+    CxPlatZeroMemory(&Destination, sizeof(Destination));
+
+    const uint32_t Limit = 1024;
+    const uint32_t Original = 2 * 1024;
+
+    Source.IsSet.StreamRecvWindowDefault = 1;
+    Source.StreamRecvWindowDefault = Limit;
+
+    Destination.IsSet.StreamRecvWindowBidiLocalDefault = 1;
+    Destination.StreamRecvWindowBidiLocalDefault = Original;
+
+    Destination.IsSet.StreamRecvWindowBidiRemoteDefault = 1;
+    Destination.StreamRecvWindowBidiRemoteDefault = Original;
+
+    Destination.IsSet.StreamRecvWindowUnidiDefault = 1;
+    Destination.StreamRecvWindowUnidiDefault = Original;
+
+    ASSERT_TRUE(QuicSettingApply(&Destination, FALSE /* no override */, TRUE, &Source));
+
+    ASSERT_EQ(Destination.StreamRecvWindowDefault, Limit);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiLocalDefault, Original);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiRemoteDefault, Original);
+    ASSERT_EQ(Destination.StreamRecvWindowUnidiDefault, Original);
+}
+
+TEST(SettingsTest, StreamRecvWindowDefaultGetsOverridenByIndividualLimits)
+{
+    QUIC_SETTINGS_INTERNAL Source;
+    QUIC_SETTINGS_INTERNAL Destination;
+    CxPlatZeroMemory(&Source, sizeof(Source));
+    CxPlatZeroMemory(&Destination, sizeof(Destination));
+
+    Source.IsSet.StreamRecvWindowDefault = 1;
+    Source.StreamRecvWindowDefault = 1 * 1024;
+
+    Source.IsSet.StreamRecvWindowBidiLocalDefault = 1;
+    Source.StreamRecvWindowBidiLocalDefault = 2 * 1024;
+
+    Source.IsSet.StreamRecvWindowBidiRemoteDefault = 1;
+    Source.StreamRecvWindowBidiRemoteDefault = 4 * 1024;
+
+    Source.IsSet.StreamRecvWindowUnidiDefault = 1;
+    Source.StreamRecvWindowUnidiDefault = 8 * 1024;
+
+    ASSERT_TRUE(QuicSettingApply(&Destination, TRUE, TRUE, &Source));
+
+    ASSERT_EQ(Destination.StreamRecvWindowDefault, Source.StreamRecvWindowDefault);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiLocalDefault, Source.StreamRecvWindowBidiLocalDefault);
+    ASSERT_EQ(Destination.StreamRecvWindowBidiRemoteDefault, Source.StreamRecvWindowBidiRemoteDefault);
+    ASSERT_EQ(Destination.StreamRecvWindowUnidiDefault, Source.StreamRecvWindowUnidiDefault);
 }
 
 // TEST(SettingsTest, TestAllVersionSettingsFieldsGet)
@@ -446,6 +537,8 @@ TEST(SettingsTest, GlobalExecutionConfigSetAndGet)
     Config->ProcessorList[0] = 0;
     Config->ProcessorList[1] = 1;
 
+    CxPlatLockInitialize(&MsQuicLib.Lock); // Initialize the lock so it can be acquired later
+
     uint32_t BufferLength = sizeof(RawConfig);
     ASSERT_EQ(
         QUIC_STATUS_SUCCESS,
@@ -499,6 +592,8 @@ TEST(SettingsTest, GlobalExecutionConfigSetAndGet)
             QUIC_PARAM_GLOBAL_EXECUTION_CONFIG,
             sizeof(RawConfig),
             Config));
+
+    CxPlatLockUninitialize(&MsQuicLib.Lock);
 }
 
 TEST(SettingsTest, GlobalRawDataPathProcsSetAfterDataPathInit)
@@ -508,12 +603,16 @@ TEST(SettingsTest, GlobalRawDataPathProcsSetAfterDataPathInit)
     Config->ProcessorCount = 2;
     Config->ProcessorList[0] = 0;
     Config->ProcessorList[1] = 1;
-    MsQuicLib.Datapath = (CXPLAT_DATAPATH*)1; // Pretend datapath has been initialized
+    CxPlatLockInitialize(&MsQuicLib.Lock); // Initialize the lock so it can be acquired later
+    MsQuicLib.PerProc = (QUIC_LIBRARY_PP*)1; // Pretend already initialized
+    MsQuicLib.Datapath = (CXPLAT_DATAPATH*)1; // Pretend already initialized
+    MsQuicLib.LazyInitComplete = TRUE;
     ASSERT_EQ(
         QUIC_STATUS_INVALID_STATE,
         QuicLibrarySetGlobalParam(
             QUIC_PARAM_GLOBAL_EXECUTION_CONFIG,
             sizeof(RawConfig),
             Config));
+    CxPlatLockUninitialize(&MsQuicLib.Lock);
 }
 #endif

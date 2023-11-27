@@ -65,6 +65,114 @@ WDFDEVICE QuicTestCtlDevice = nullptr;
 QUIC_DEVICE_EXTENSION* QuicTestCtlExtension = nullptr;
 QUIC_TEST_CLIENT* QuicTestClient = nullptr;
 
+typedef struct QuicTestNmrClient {
+    NPI_CLIENT_CHARACTERISTICS NpiClientCharacteristics;
+    HANDLE NmrClientHandle;
+    NPI_MODULEID ModuleId;
+    CXPLAT_EVENT RegistrationCompleteEvent;
+    MSQUIC_NMR_DISPATCH* ProviderDispatch;
+    BOOLEAN Deleting;
+} QuicTestNmrClient;
+
+static QuicTestNmrClient NmrClient;
+
+static
+NTSTATUS
+QuicTestClientAttachProvider(
+    _In_ HANDLE NmrBindingHandle,
+    _In_ void *ClientContext,
+    _In_ const NPI_REGISTRATION_INSTANCE *ProviderRegistrationInstance
+    )
+{
+    UNREFERENCED_PARAMETER(ProviderRegistrationInstance);
+
+    NTSTATUS Status;
+    QuicTestNmrClient* Client = (QuicTestNmrClient*)ClientContext;
+    void* ProviderContext;
+
+    #pragma warning(suppress:6387) // _Param_(2) could be '0' - by design.
+    Status =
+        NmrClientAttachProvider(
+            NmrBindingHandle,
+            Client,
+            NULL,
+            &ProviderContext,
+            (const void**)&Client->ProviderDispatch);
+    if (!NT_SUCCESS(Status)) {
+        QuicTraceEvent(
+            LibraryErrorStatus,
+            "[ lib] ERROR, %u, %s.",
+            Status,
+            "NmrClientAttachProvider failed");
+    }
+    CxPlatEventSet(Client->RegistrationCompleteEvent);
+    return Status;
+}
+
+static
+NTSTATUS
+QuicTestClientDetachProvider(
+    _In_ void *ClientBindingContext
+    )
+{
+    QuicTestNmrClient* Client = (QuicTestNmrClient*)ClientBindingContext;
+    if (InterlockedFetchAndSetBoolean(&Client->Deleting)) {
+        return STATUS_SUCCESS;
+    } else {
+        return STATUS_PENDING;
+    }
+}
+
+NTSTATUS
+QuicTestRegisterNmrClient(
+    void
+    )
+{
+    NPI_REGISTRATION_INSTANCE *ClientRegistrationInstance;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    CxPlatEventInitialize(&NmrClient.RegistrationCompleteEvent, FALSE, FALSE);
+    NmrClient.ModuleId.Length = sizeof(NmrClient.ModuleId);
+    NmrClient.ModuleId.Type = MIT_GUID;
+    NmrClient.ModuleId.Guid = MSQUIC_MODULE_ID;
+
+    NmrClient.NpiClientCharacteristics.Length = sizeof(NmrClient.NpiClientCharacteristics);
+    NmrClient.NpiClientCharacteristics.ClientAttachProvider = QuicTestClientAttachProvider;
+    NmrClient.NpiClientCharacteristics.ClientDetachProvider = QuicTestClientDetachProvider;
+
+    ClientRegistrationInstance = &NmrClient.NpiClientCharacteristics.ClientRegistrationInstance;
+    ClientRegistrationInstance->Size = sizeof(*ClientRegistrationInstance);
+    ClientRegistrationInstance->Version = 0;
+    ClientRegistrationInstance->NpiId = &MSQUIC_NPI_ID;
+    ClientRegistrationInstance->ModuleId = &NmrClient.ModuleId;
+
+    Status =
+        NmrRegisterClient(
+            &NmrClient.NpiClientCharacteristics, &NmrClient, &NmrClient.NmrClientHandle);
+    if (!NT_SUCCESS(Status)) {
+        QuicTraceEvent(
+            LibraryErrorStatus,
+            "[ lib] ERROR, %u, %s.",
+            Status,
+            "NmrRegisterClient failed");
+        goto Exit;
+    }
+
+    if (!CxPlatEventWaitWithTimeout(NmrClient.RegistrationCompleteEvent, 1000)) {
+        Status = STATUS_UNSUCCESSFUL;
+        QuicTraceEvent(
+            LibraryErrorStatus,
+            "[ lib] ERROR, %u, %s.",
+            Status,
+            "client registration timed out");
+        goto Exit;
+    }
+
+Exit:
+    return Status;
+}
+
+
 _No_competing_thread_
 INITCODE
 NTSTATUS
@@ -81,7 +189,20 @@ QuicTestCtlInitialize(
     WDF_IO_QUEUE_CONFIG QueueConfig;
     WDFQUEUE Queue;
 
-    MsQuic = new (std::nothrow) MsQuicApi();
+    Status = QuicTestRegisterNmrClient();
+    if (!NT_SUCCESS(Status)) {
+        QuicTraceEvent(
+            LibraryErrorStatus,
+            "[ lib] ERROR, %u, %s.",
+            Status,
+            "QuicTestRegisterNmrClient failed");
+        goto Error;
+    }
+
+    MsQuic =
+        new (std::nothrow) MsQuicApi(
+            NmrClient.ProviderDispatch->MsQuicOpenVersion,
+            NmrClient.ProviderDispatch->MsQuicClose);
     if (!MsQuic) {
         goto Error;
     }
@@ -221,6 +342,26 @@ QuicTestCtlUninitialize(
     }
 
     delete MsQuic;
+
+    if (InterlockedFetchAndSetBoolean(&NmrClient.Deleting)) {
+        //
+        // We are already in the middle of detaching the client.
+        // Complete it now.
+        //
+        NmrClientDetachProviderComplete(NmrClient.NmrClientHandle);
+    }
+
+    if (NmrClient.NmrClientHandle) {
+        NTSTATUS Status = NmrDeregisterClient(NmrClient.NmrClientHandle);
+        CXPLAT_FRE_ASSERTMSG(Status == STATUS_PENDING, "client deregistration failed");
+        if (Status == STATUS_PENDING) {
+            //
+            // Wait for the deregistration to complete.
+            //
+            NmrWaitForClientDeregisterComplete(NmrClient.NmrClientHandle);
+        }
+        NmrClient.NmrClientHandle = NULL;
+    }
 
     QuicTraceLogVerbose(
         TestControlUninitialized,
@@ -480,6 +621,13 @@ size_t QUIC_IOCTL_BUFFER_SIZES[] =
     sizeof(UINT8),
     sizeof(BOOLEAN),
     sizeof(INT32),
+    sizeof(QUIC_HANDSHAKE_LOSS_PARAMS),
+    sizeof(QUIC_RUN_CUSTOM_CERT_VALIDATION),
+    sizeof(QUIC_RUN_FEATURE_NEGOTIATION),
+    sizeof(QUIC_RUN_FEATURE_NEGOTIATION),
+    0,
+    0,
+    0,
     sizeof(INT32),
 };
 
@@ -516,7 +664,8 @@ typedef union {
     QUIC_RUN_VN_TP_ODD_SIZE_PARAMS OddSizeVnTpParams;
     UINT8 TestServerVNTP;
     BOOLEAN Bidirectional;
-
+    QUIC_RUN_FEATURE_NEGOTIATION FeatureNegotiationParams;
+    QUIC_HANDSHAKE_LOSS_PARAMS HandshakeLossParams;
 } QUIC_IOCTL_PARAMS;
 
 #define QuicTestCtlRun(X) \
@@ -893,7 +1042,8 @@ QuicTestCtlEvtIoDeviceControl(
         QuicTestCtlRun(
             QuicTestNatAddrRebind(
                 Params->RebindParams.Family,
-                Params->RebindParams.Padding));
+                Params->RebindParams.Padding,
+                FALSE));
         break;
 
     case IOCTL_QUIC_RUN_CHANGE_MAX_STREAM_ID:
@@ -920,10 +1070,10 @@ QuicTestCtlEvtIoDeviceControl(
             QuicTestAckSendDelay(Params->Family));
         break;
 
-    case IOCTL_QUIC_RUN_CUSTOM_CERT_VALIDATION:
+    case IOCTL_QUIC_RUN_CUSTOM_SERVER_CERT_VALIDATION:
         CXPLAT_FRE_ASSERT(Params != nullptr);
         QuicTestCtlRun(
-            QuicTestCustomCertificateValidation(
+            QuicTestCustomServerCertificateValidation(
                 Params->CustomCertValidationParams.AcceptCert,
                 Params->CustomCertValidationParams.AsyncValidation));
         break;
@@ -1327,7 +1477,53 @@ QuicTestCtlEvtIoDeviceControl(
 
     case IOCTL_QUIC_RUN_HANDSHAKE_SPECIFIC_LOSS_PATTERNS:
         CXPLAT_FRE_ASSERT(Params != nullptr);
-        QuicTestCtlRun(QuicTestHandshakeSpecificLossPatterns(Params->Family));
+        QuicTestCtlRun(
+            QuicTestHandshakeSpecificLossPatterns(
+                Params->HandshakeLossParams.Family,
+                Params->HandshakeLossParams.CcAlgo));
+        break;
+
+    case IOCTL_QUIC_RUN_CUSTOM_CLIENT_CERT_VALIDATION:
+        CXPLAT_FRE_ASSERT(Params != nullptr);
+        QuicTestCtlRun(
+            QuicTestCustomClientCertificateValidation(
+                Params->CustomCertValidationParams.AcceptCert,
+                Params->CustomCertValidationParams.AsyncValidation));
+        break;
+#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    case IOCTL_QUIC_RELIABLE_RESET_NEGOTIATION:
+        CXPLAT_FRE_ASSERT(Params != nullptr);
+        QuicTestCtlRun(
+            QuicTestReliableResetNegotiation(
+                Params->FeatureNegotiationParams.Family,
+                Params->FeatureNegotiationParams.ServerSupport,
+                Params->FeatureNegotiationParams.ClientSupport));
+        break;
+    case IOCTL_QUIC_ONE_WAY_DELAY_NEGOTIATION:
+        CXPLAT_FRE_ASSERT(Params != nullptr);
+        QuicTestCtlRun(
+            QuicTestOneWayDelayNegotiation(
+                Params->FeatureNegotiationParams.Family,
+                Params->FeatureNegotiationParams.ServerSupport,
+                Params->FeatureNegotiationParams.ClientSupport));
+        break;
+
+    case IOCTL_QUIC_RUN_STREAM_RELIABLE_RESET:
+        QuicTestCtlRun(QuicTestStreamReliableReset());
+        break;
+
+    case IOCTL_QUIC_RUN_STREAM_RELIABLE_RESET_MULTIPLE_SENDS:
+        QuicTestCtlRun(QuicTestStreamReliableResetMultipleSends());
+        break;
+#endif
+
+    case IOCTL_QUIC_RUN_STATELESS_RESET_KEY:
+        QuicTestCtlRun(QuicTestStatelessResetKey());
+        break;
+
+    case IOCTL_QUIC_RUN_DRILL_VN_PACKET_TOKEN:
+        CXPLAT_FRE_ASSERT(Params != nullptr);
+        QuicTestCtlRun(QuicDrillTestServerVNPacket(Params->Family));
         break;
 
     default:

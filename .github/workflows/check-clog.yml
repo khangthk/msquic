@@ -20,11 +20,11 @@ jobs:
     runs-on: windows-latest
     steps:
     - name: Setup .NET
-      uses: actions/setup-dotnet@607fce577a46308457984d59e4954e075820f10a
+      uses: actions/setup-dotnet@3447fd6a9f9e57506b15f895c5b76d3b197dc7c2
       with:
         dotnet-version: 6.0.x
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
     - name: Prepare Machine
       run: scripts/prepare-machine.ps1
       shell: pwsh

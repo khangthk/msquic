@@ -15,13 +15,17 @@ On Windows, MsQuic leverages manifested [ETW](https://docs.microsoft.com/en-us/w
 
 ### Linux
 
+#### LTTng
 On Linux, MsQuic leverages [LTTng](https://lttng.org/features/) for its logging. Some dependencies, such as babeltrace, lttng, and clog2text_lttng are required. The simplest way to install all dependencies is by running `./scripts/prepare-machine.ps1 -ForTest`, but if you only want to collect the traces on the machine, the **minimal dependencies** are:
 
 ```
-sudo apt-add-repository ppa:lttng/stable-2.12
+sudo apt-add-repository ppa:lttng/stable-2.13
 sudo apt-get update
 sudo apt-get install -y lttng-tools
 ```
+
+#### Perf
+For general tracing, refer [Stacks and CPU usage](../src/plugins/trace/README.md#linux)
 
 ### macOS
 
@@ -131,7 +135,7 @@ As already indicated, there are lots of ways to collect ETW traces. Feel free to
 ## Linux
 
 ### All in one command
-This script wraps collecting trace then converting to text as well  
+This script wraps collecting trace then converting to text as well
 **WARN**: This wrapper doesn't work with `./scripts/test.ps1` etc. as it is also creating lttng session internally.
 ```sh
 cd ${MSQUIC_PATH}
@@ -184,6 +188,26 @@ wevtutil.exe im path\to\MsQuicEtw.man /rf:path\to\msquic.dll /mf:path\to\msquic.
 Replace `path\to` with the actual paths to the respective files. With the latest manifests installed, now the normal `netsh.exe` convert command should work.
 
 ## Linux
+
+NOTE: `msquic.lttng.so` must be built to enable lttng logging - see https://lttng.org/docs/v2.13/#doc-liblttng-ust-dl
+and it must be placed in the same directory as the `msquic.so`.
+
+Building `clog2text_lttng`:
+```
+cat > /etc/apt/preferences.d/99microsoft-dotnet.pref <<EOF
+Package: *
+Pin: origin "packages.microsoft.com"
+Pin-Priority: 1001
+EOF
+apt update
+apt install --no-install-recommends -y dotnet-runtime-6.0 dotnet-sdk-6.0 dotnet-host
+git submodule update --init submodules/clog
+dotnet build submodules/clog/src/clog2text/clog2text_lttng/ -c Release
+```
+> **Note**  
+> if you see error "A fatal error occurred. The folder [/usr/share/dotnet/host/fxr] does not exist"  
+> follow steps in https://stackoverflow.com/questions/73753672/a-fatal-error-occurred-the-folder-usr-share-dotnet-host-fxr-does-not-exist
+
 
 To convert the trace, you can use the following commands:
 

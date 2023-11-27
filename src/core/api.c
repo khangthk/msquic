@@ -244,6 +244,7 @@ MsQuicConnectionShutdown(
     Oper->API_CALL.Context->CONN_SHUTDOWN.Flags = Flags;
     Oper->API_CALL.Context->CONN_SHUTDOWN.ErrorCode = ErrorCode;
     Oper->API_CALL.Context->CONN_SHUTDOWN.RegistrationShutdown = FALSE;
+    Oper->API_CALL.Context->CONN_SHUTDOWN.TransportShutdown = FALSE;
 
     //
     // Queue the operation but don't wait for the completion.
@@ -657,13 +658,7 @@ MsQuicStreamOpen(
         goto Error;
     }
 
-    Status =
-        QuicStreamInitialize(
-            Connection,
-            FALSE,
-            !!(Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL),
-            !!(Flags & QUIC_STREAM_OPEN_FLAG_0_RTT),
-            (QUIC_STREAM**)NewStream);
+    Status = QuicStreamInitialize(Connection, FALSE, Flags, (QUIC_STREAM**)NewStream);
     if (QUIC_FAILED(Status)) {
         goto Error;
     }
@@ -1012,6 +1007,7 @@ MsQuicStreamSend(
     uint64_t TotalLength;
     QUIC_SEND_REQUEST* SendRequest;
     BOOLEAN QueueOper = TRUE;
+    BOOLEAN SendInline;
     QUIC_OPERATION* Oper;
 
     QuicTraceEvent(
@@ -1086,6 +1082,10 @@ MsQuicStreamSend(
     SendRequest->TotalLength = TotalLength;
     SendRequest->ClientContext = ClientSendContext;
 
+    SendInline =
+        !Connection->Settings.SendBufferingEnabled &&
+        Connection->WorkerThreadID == CxPlatCurThreadID();
+
     CxPlatDispatchLockAcquire(&Stream->ApiSendRequestLock);
     if (!Stream->Flags.SendEnabled) {
         Status =
@@ -1100,6 +1100,15 @@ MsQuicStreamSend(
         }
         *ApiSendRequestsTail = SendRequest;
         Status = QUIC_STATUS_SUCCESS;
+
+        if (!SendInline && QueueOper) {
+            //
+            // Async stream operations need to hold a ref on the stream so that
+            // the stream isn't freed before the operation can be processed. The
+            // ref is released after the operation is processed.
+            //
+            QuicStreamAddRef(Stream, QUIC_STREAM_REF_OPERATION);
+        }
     }
     CxPlatDispatchLockRelease(&Stream->ApiSendRequestLock);
 
@@ -1108,8 +1117,7 @@ MsQuicStreamSend(
         goto Exit;
     }
 
-    if (!Connection->Settings.SendBufferingEnabled &&
-        Connection->WorkerThreadID == CxPlatCurThreadID()) {
+    if (SendInline) {
 
         CXPLAT_PASSIVE_CODE();
 
@@ -1125,23 +1133,44 @@ MsQuicStreamSend(
     } else if (QueueOper) {
         Oper = QuicOperationAlloc(Connection->Worker, QUIC_OPER_TYPE_API_CALL);
         if (Oper == NULL) {
-            Status = QUIC_STATUS_OUT_OF_MEMORY;
             QuicTraceEvent(
                 AllocFailure,
                 "Allocation of '%s' failed. (%llu bytes)",
                 "STRM_SEND operation",
                 0);
+
+            Status = QUIC_STATUS_OUT_OF_MEMORY;
+
+            //
+            // We failed to alloc the operation we needed to queue, so make sure
+            // to release the ref we took above.
+            //
+            QuicStreamRelease(Stream, QUIC_STREAM_REF_OPERATION);
+
+            //
+            // We can't fail the send at this point, because we're already queued
+            // the send above. So instead, we're just going to abort the whole
+            // connection.
+            //
+            if (InterlockedCompareExchange16(
+                    (short*)&Connection->BackUpOperUsed, 1, 0) != 0) {
+                goto Exit; // It's already started the shutdown.
+            }
+            Oper = &Connection->BackUpOper;
+            Oper->FreeAfterProcess = FALSE;
+            Oper->Type = QUIC_OPER_TYPE_API_CALL;
+            Oper->API_CALL.Context = &Connection->BackupApiContext;
+            Oper->API_CALL.Context->Type = QUIC_API_TYPE_CONN_SHUTDOWN;
+            Oper->API_CALL.Context->CONN_SHUTDOWN.Flags = QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT;
+            Oper->API_CALL.Context->CONN_SHUTDOWN.ErrorCode = (QUIC_VAR_INT)QUIC_STATUS_OUT_OF_MEMORY;
+            Oper->API_CALL.Context->CONN_SHUTDOWN.RegistrationShutdown = FALSE;
+            Oper->API_CALL.Context->CONN_SHUTDOWN.TransportShutdown = TRUE;
+            QuicConnQueueOper(Connection, Oper);
             goto Exit;
         }
+
         Oper->API_CALL.Context->Type = QUIC_API_TYPE_STRM_SEND;
         Oper->API_CALL.Context->STRM_SEND.Stream = Stream;
-
-        //
-        // Async stream operations need to hold a ref on the stream so that the
-        // stream isn't freed before the operation can be processed. The ref is
-        // released after the operation is processed.
-        //
-        QuicStreamAddRef(Stream, QUIC_STREAM_REF_OPERATION);
 
         //
         // Queue the operation but don't wait for the completion.
@@ -1705,6 +1734,77 @@ MsQuicConnectionResumptionTicketValidationComplete(
 
     Oper->API_CALL.Context->Type = QUIC_API_TYPE_CONN_COMPLETE_RESUMPTION_TICKET_VALIDATION;
     Oper->API_CALL.Context->CONN_COMPLETE_RESUMPTION_TICKET_VALIDATION.Result = Result;
+
+    //
+    // Queue the operation but don't wait for the completion.
+    //
+    QuicConnQueueOper(Connection, Oper);
+    Status = QUIC_STATUS_PENDING;
+
+Error:
+
+    QuicTraceEvent(
+        ApiExitStatus,
+        "[ api] Exit %u",
+        Status);
+
+    return Status;
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicConnectionCertificateValidationComplete(
+    _In_ _Pre_defensive_ HQUIC Handle,
+    _In_ BOOLEAN Result,
+    _In_ QUIC_TLS_ALERT_CODES TlsAlert
+    )
+{
+    QUIC_STATUS Status;
+    QUIC_CONNECTION* Connection;
+    QUIC_OPERATION* Oper;
+
+    QuicTraceEvent(
+        ApiEnter,
+        "[ api] Enter %u (%p).",
+        QUIC_TRACE_API_CONNECTION_COMPLETE_CERTIFICATE_VALIDATION,
+        Handle);
+
+    if (IS_CONN_HANDLE(Handle)) {
+#pragma prefast(suppress: __WARNING_25024, "Pointer cast already validated.")
+        Connection = (QUIC_CONNECTION*)Handle;
+    } else if (IS_STREAM_HANDLE(Handle)) {
+#pragma prefast(suppress: __WARNING_25024, "Pointer cast already validated.")
+        QUIC_STREAM* Stream = (QUIC_STREAM*)Handle;
+        CXPLAT_TEL_ASSERT(!Stream->Flags.HandleClosed);
+        CXPLAT_TEL_ASSERT(!Stream->Flags.Freed);
+        Connection = Stream->Connection;
+    } else {
+        Status = QUIC_STATUS_INVALID_PARAMETER;
+        goto Error;
+    }
+
+    QUIC_CONN_VERIFY(Connection, !Connection->State.Freed);
+
+    if (!Result && TlsAlert > QUIC_TLS_ALERT_CODE_MAX) {
+        Status = QUIC_STATUS_INVALID_PARAMETER;
+        goto Error;
+    }
+
+    Oper = QuicOperationAlloc(Connection->Worker, QUIC_OPER_TYPE_API_CALL);
+    if (Oper == NULL) {
+        Status = QUIC_STATUS_OUT_OF_MEMORY;
+        QuicTraceEvent(
+            AllocFailure,
+            "Allocation of '%s' failed. (%llu bytes)",
+            "CONN_COMPLETE_CERTIFICATE_VALIDATION operation",
+            0);
+        goto Error;
+    }
+
+    Oper->API_CALL.Context->Type = QUIC_API_TYPE_CONN_COMPLETE_CERTIFICATE_VALIDATION;
+    Oper->API_CALL.Context->CONN_COMPLETE_CERTIFICATE_VALIDATION.TlsAlert = TlsAlert;
+    Oper->API_CALL.Context->CONN_COMPLETE_CERTIFICATE_VALIDATION.Result = Result;
 
     //
     // Queue the operation but don't wait for the completion.

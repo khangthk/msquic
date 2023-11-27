@@ -297,7 +297,7 @@ public:
 
     QUIC_STATUS SetResumptionTicket(const QUIC_BUFFER* ResumptionTicket) const;
 
-    QUIC_STATUS SetCustomValidationResult(bool AcceptCert);
+    QUIC_STATUS SetCustomValidationResult(bool AcceptCert, QUIC_TLS_ALERT_CODES TlsAlert = QUIC_TLS_ALERT_CODE_BAD_CERTIFICATE);
 
     QUIC_STATUS SetCustomTicketValidationResult(bool AcceptTicket);
 
@@ -305,4 +305,6 @@ public:
 
     const uint8_t* GetNegotiatedAlpn() const;
     uint8_t GetNegotiatedAlpnLength() const;
+
+    QUIC_STATUS SetTlsSecrets(QUIC_TLS_SECRETS* Secrets);
 };
