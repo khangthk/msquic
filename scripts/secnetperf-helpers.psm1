@@ -221,15 +221,47 @@ function Cleanup-State {
             if ($null -ne (Get-Service msquicpriv -ErrorAction Ignore)) { throw "secnetperfdrvpriv still running remotely!" }
             if ($null -ne (Get-Service msquicpriv -ErrorAction Ignore)) { throw "msquicpriv still running remotely!" }
         }
+        # Clean up any ETL residue.
+        try { .\scripts\log.ps1 -Cancel }
+        catch { Write-Host "Failed to stop logging on client!" }
+        Invoke-Command -Session $Session -ScriptBlock {
+            try { & "$Using:RemoteDir/scripts/log.ps1" -Cancel }
+            catch { Write-Host "Failed to stop logging on server!" }
+        }
+    } else {
+        # iterate all interface and "ip link set ${iface} xdp off"
+        if ((ip link show) -match "xdp") {
+            $ifaces = ip link show | grep -oP '^\d+: \K[\w@]+' | cut -d'@' -f1
+            foreach ($xdp in @('xdp', 'xdpgeneric')) {
+                foreach ($iface in $ifaces) {
+                    sudo ip link set $iface $xdp off
+                }
+            }
+        }
+        Invoke-Command -Session $Session -ScriptBlock {
+            if ((ip link show) -match "xdp") {
+                $ifaces = ip link show | grep -oP '^\d+: \K[\w@]+' | cut -d'@' -f1
+                foreach ($xdp in @('xdp', 'xdpgeneric')) {
+                    foreach ($iface in $ifaces) {
+                        sudo ip link set $iface $xdp off
+                    }
+                }
+            }
+        }
     }
 }
 
 # Waits for a remote job to be ready based on looking for a particular string in
 # the output.
 function Start-RemoteServer {
-    param ($Session, $Command)
+    param ($Session, $Command, $ServerArgs, $UseSudo)
     # Start the server on the remote in an async job.
-    $job = Invoke-Command -Session $Session -ScriptBlock { iex $Using:Command } -AsJob
+
+    if ($UseSudo) {
+        $job = Invoke-Command -Session $Session -ScriptBlock { iex "sudo LD_LIBRARY_PATH=$(Split-Path $Using:Command -Parent)  $Using:Command $Using:ServerArgs" } -AsJob
+    } else {
+        $job = Invoke-Command -Session $Session -ScriptBlock { iex "$Using:Command $Using:ServerArgs"} -AsJob
+    }
     # Poll the job for 10 seconds to see if it started.
     $stopWatch = [system.diagnostics.stopwatch]::StartNew()
     while ($stopWatch.ElapsedMilliseconds -lt 10000) {
@@ -249,6 +281,71 @@ function Start-RemoteServer {
     $RemoteResult = $RemoteResult -join "`n"
     Write-Host $RemoteResult.ToString()
     throw "Server failed to start!"
+}
+
+# Passively starts the server on the remote machine by queuing up a new script to execute.
+function Start-RemoteServerPassive {
+    param ($Session, $Command, $RemoteStateDir, $RunId, $SyncerSecret)
+    if ($Session -eq "NOT_SUPPORTED") {
+        Write-Host "Command to start server: $Command"
+        $headers = @{
+            "secret" = "$SyncerSecret"
+        }
+        $url = "https://netperfapiwebapp.azurewebsites.net"
+        try {
+            $Response = Invoke-WebRequest -Uri "$url/getkeyvalue?key=$RunId" -Headers $headers
+        } catch {
+            Write-Host "Unable to fetch state. Creating a new one now."
+            $state = [pscustomobject]@{
+                value=[pscustomobject]@{
+                "SeqNum" = 0
+                "Commands" = @($Command)
+            }}
+            $StateJson = $state | ConvertTo-Json
+            $Response = Invoke-WebRequest -Uri "$url/setkeyvalue?key=$RunId" -Headers $headers -Method Post -Body $StateJson -ContentType "application/json"
+            if ($Response.StatusCode -ne 200) {
+                Write-GHError "[Start-Remote-Passive] Failed to set the key value!"
+                throw "Failed to set the key value!"
+            }
+            return
+        }
+        $CurrState = $Response.Content | ConvertFrom-Json
+        $CurrState.Commands += $Command
+        $CurrState = [pscustomobject]@{
+            value=$CurrState
+        }
+        $StateJson = $CurrState | ConvertTo-Json
+        $Response = Invoke-WebRequest -Uri "$url/setkeyvalue?key=$RunId" -Headers $headers -Method Post -Body $StateJson -ContentType "application/json"
+        if ($Response.StatusCode -ne 200) {
+            Write-GHError "[Start-Remote-Passive] Failed to set the key value!"
+            throw "Failed to set the key value!"
+        }
+        return
+    }
+
+    Invoke-Command -Session $Session -ScriptBlock {
+        if (!(Test-Path $Using:RemoteStateDir)) {
+            New-Item -ItemType Directory $Using:RemoteStateDir | Out-Null
+        }
+        # Fetch all files names inside the directory
+        $files = Get-ChildItem $Using:RemoteStateDir
+        # Find the highest lexicographically sorted file name
+        $max = 0
+        foreach ($file in $files) {
+            # Remove .ps1 extension from file.Name
+            $filename = $file.Name.split(".")[0]
+            $num = [int]($filename -replace "[^0-9]", "")
+            if ($num -gt $max) {
+                $max = $num
+            }
+        }
+        $newmax = $max + 1
+        # Create a new file with the next number
+        Write-Host "Creating new file execute_$newmax.ps1"
+        New-Item -ItemType File (Join-Path $Using:RemoteStateDir ("execute_$newmax.ps1")) | Out-Null
+        $newFile = Join-Path $Using:RemoteStateDir ("execute_$newmax.ps1")
+        Set-Content -Path $newFile -Value $Using:Command
+    }
 }
 
 # Sends a special UDP packet to tell the remote secnetperf to shutdown, and then
@@ -274,16 +371,101 @@ function Stop-RemoteServer {
     return $RemoteResult -join "`n"
 }
 
+function Stop-RemoteServerAsyncAwait {
+    param ($Session, $RemoteStateDir, $RemoteAddress, $RunId, $SyncerSecret)
+    # Ping side-channel socket on 9999 to tell the app to die
+    $Socket = New-Object System.Net.Sockets.UDPClient
+    $BytesToSend = @(
+        0x57, 0xe6, 0x15, 0xff, 0x26, 0x4f, 0x0e, 0x57,
+        0x88, 0xab, 0x07, 0x96, 0xb2, 0x58, 0xd1, 0x1c
+    )
+    if ($Session -eq "NOT_SUPPORTED") {
+        for ($i = 0; $i -lt 30; $i++) {
+            $Socket.Send($BytesToSend, $BytesToSend.Length, $RemoteAddress, 9999) | Out-Null
+            Start-Sleep -Seconds 8 | Out-Null
+            $headers = @{
+                "secret" = "$SyncerSecret"
+            }
+            $url = "https://netperfapiwebapp.azurewebsites.net"
+            $Response = Invoke-WebRequest -Uri "$url/getkeyvalue?key=$RunId" -Headers $headers
+            if (!($Response.StatusCode -eq 200)) {
+                Write-GHError "[Stop-Remote-Passive] Failed to get the key value!"
+                throw "Failed to get the key value!"
+            }
+            $CurrState = $Response.Content | ConvertFrom-Json
+            if ($CurrState.SeqNum -eq $CurrState.Commands.Count) {
+                return
+            }
+        }
+        Write-GHError "[Stop-Remote-Passive] SeqNum less than Commands Count!"
+        throw "Unable to stop the remote server in time!"
+    }
+    $done = $false
+    $MaxSeqNum = 0
+    for ($i = 0; $i -lt 30; $i++) {
+        $Socket.Send($BytesToSend, $BytesToSend.Length, $RemoteAddress, 9999) | Out-Null
+        Start-Sleep -Seconds 5 | Out-Null
+        $files = Invoke-Command -Session $Session -ScriptBlock { Get-ChildItem $Using:RemoteStateDir }
+        foreach ($file in $files) {
+            $filename = $file.Name.split(".")[0]
+            $num = [int]($filename -replace "[^0-9]", "")
+            if ($num -gt $MaxSeqNum) {
+                $MaxSeqNum = $num
+            }
+        }
+        # Check if completed_<MaxSeqNum>.txt exists
+        foreach ($file in $files) {
+            if ($file.Name -eq "completed_$MaxSeqNum.txt") {
+                $done = $true
+                break
+            }
+        }
+        if ($done) {
+            break
+        }
+    }
+    if (!$done) {
+        Write-GHError "[Stop-Remote-Passive] Unable to find a corresponding 'completed_$MaxSeqNum' file!"
+        throw "Unable to stop the remote server in time!"
+    }
+}
+
+function Wait-StartRemoteServerPassive {
+    param ($FullPath, $RemoteName, $OutputDir, $UseSudo)
+
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 5 | Out-Null
+        Write-Host "Attempt $i to start the remote server, command: $FullPath -target:$RemoteName"
+        $Process = Start-LocalTest $FullPath "-target:$RemoteName" $OutputDir $UseSudo
+        $ConsoleOutput = Wait-LocalTest $Process $OutputDir $false 30000 $true
+        Write-Host "Wait-StartRemoteServerPassive: $ConsoleOutput"
+        $DidMatch = $ConsoleOutput -match "Completed" # Look for the special string to indicate success.
+        if ($DidMatch) {
+            return
+        }
+    }
+
+    throw "Unable to start the remote server in time!"
+}
+
 # Creates a new local process to asynchronously run the test.
 function Start-LocalTest {
-    param ($FullPath, $FullArgs, $OutputDir)
+    param ($FullPath, $FullArgs, $OutputDir, $UseSudo)
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
     if ($IsWindows) {
         $pinfo.FileName = $FullPath
         $pinfo.Arguments = $FullArgs
     } else {
-        $pinfo.FileName = "bash"
-        $pinfo.Arguments = "-c `"ulimit -c unlimited && LSAN_OPTIONS=report_objects=1 ASAN_OPTIONS=disable_coredump=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 $FullPath $FullArgs && echo ''`""
+        # We use bash to execute the test so we can collect core dumps.
+        $NOFILE = Invoke-Expression "bash -c 'ulimit -n'"
+        $CommonCommand = "ulimit -n $NOFILE && ulimit -c unlimited && LD_LIBRARY_PATH=$(Split-Path $FullPath -Parent) LSAN_OPTIONS=report_objects=1 ASAN_OPTIONS=disable_coredump=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 $FullPath $FullArgs && echo ''"
+        if ($UseSudo) {
+            $pinfo.FileName = "/usr/bin/sudo"
+            $pinfo.Arguments = "/usr/bin/bash -c `"$CommonCommand`""
+        } else {
+            $pinfo.FileName = "bash"
+            $pinfo.Arguments = "-c `"$CommonCommand`""
+        }
         $pinfo.WorkingDirectory = $OutputDir
     }
     $pinfo.RedirectStandardOutput = $true
@@ -297,10 +479,12 @@ function Start-LocalTest {
 
 # Waits for a local test process to complete, and then returns the console output.
 function Wait-LocalTest {
-    param ($Process, $OutputDir, $testKernel, $TimeoutMs)
+    param ($Process, $OutputDir, $testKernel, $TimeoutMs, $Silent = $false)
     $StdOut = $Process.StandardOutput.ReadToEndAsync()
     $StdError = $Process.StandardError.ReadToEndAsync()
+    # Wait for the process to exit.
     if (!$Process.WaitForExit($TimeoutMs)) {
+        # We timed out waiting for completion. Collect a dump of the current state.
         if ($testKernel) { Collect-LiveKD $OutputDir "client" }
         Collect-LocalDump $Process $OutputDir
         try { $Process.Kill() } catch { }
@@ -309,22 +493,40 @@ function Wait-LocalTest {
             $Out = $StdOut.Result.Trim()
             if ($Out.Length -ne 0) { Write-Host $Out }
         } catch {}
+        if ($Silent) {
+            Write-Host "Silently ignoring Client timeout!"
+            return ""
+        }
         throw "secnetperf: Client timed out!"
     }
+    # Verify the process cleanly exitted.
     if ($Process.ExitCode -ne 0) {
         try {
             [System.Threading.Tasks.Task]::WaitAll(@($StdOut, $StdError))
             $Out = $StdOut.Result.Trim()
             if ($Out.Length -ne 0) { Write-Host $Out }
         } catch {}
+        if ($Silent) {
+            Write-Host "Silently ignoring Client exit code: $($Process.ExitCode)"
+            return ""
+        }
         throw "secnetperf: Nonzero exit code: $($Process.ExitCode)"
     }
+    # Wait for the output streams to flush.
     [System.Threading.Tasks.Task]::WaitAll(@($StdOut, $StdError))
     $consoleTxt = $StdOut.Result.Trim()
     if ($consoleTxt.Length -eq 0) {
+        if ($Silent) {
+            Write-Host "Silently ignoring Client no console output!"
+            return ""
+        }
         throw "secnetperf: No console output (possibly crashed)!"
     }
     if ($consoleTxt.Contains("Error")) {
+        if ($Silent) {
+            Write-Host "Silently ignoring Client error: $($consoleTxt)"
+            return ""
+        }
         throw "secnetperf: $($consoleTxt.Substring(7))" # Skip over the "Error: " prefix
     }
     return $consoleTxt
@@ -377,28 +579,72 @@ function Get-TestOutput {
     }
 }
 
+function Get-LatencyOutput {
+    param ($FilePath)
+    # The data is in the format of:
+    #
+    #       Value   Percentile   TotalCount 1/(1-Percentile)
+    #
+    #      93.000     0.000000            1         1.00
+    #     118.000     0.100000        18203         1.11
+    #     120.000     0.200000        29488         1.25
+    #         ...          ...          ...          ...
+    #    9847.000     0.999992       139772    131072.00
+    #   41151.000     0.999993       139773    145635.56
+    #   41151.000     1.000000       139773          inf
+    ##[Mean    =      142.875, StdDeviation   =      137.790]
+    ##[Max     =    41151.000, Total count    =       139773]
+    ##[Buckets =            6, SubBuckets     =         2048]
+
+    $contents = Get-Content $FilePath
+    Remove-Item $FilePath
+
+    # Parse through the data and extract the Value and Percentile columns and
+    # convert to an array. Ignore the trailing data.
+    $values = @()
+    $percentiles = @()
+    foreach ($line in $contents) {
+        if ($line -match "^\s*(\d+\.\d+)\s+(\d+\.\d+)") {
+            $values += [int]$matches[1]
+            $percentiles += [double]$matches[2]
+        }
+    }
+
+    return [pscustomobject]@{
+        Values = $values
+        Percentiles = $percentiles
+    }
+}
+
 # Invokes secnetperf with the given arguments for both TCP and QUIC.
 function Invoke-Secnetperf {
-    param ($Session, $RemoteName, $RemoteDir, $SecNetPerfPath, $LogProfile, $TestId, $ExeArgs, $io, $Filter)
+    param ($Session, $RemoteName, $RemoteDir, $UserName, $SecNetPerfPath, $LogProfile, $TestId, $ExeArgs, $io, $Filter, $Environment, $RunId, $SyncerSecret)
 
+    $values = @(@(), @())
+    $latency = $null
+    $extraOutput = $null
+    $hasFailures = $false
+    $tcpSupported = ($io -ne "xdp" -and $io -ne "qtip" -and $io -ne "wsk") ? 1 : 0
     $metric = "throughput"
     if ($exeArgs.Contains("plat:1")) {
         $metric = "latency"
+        $latency = @(@(), @())
+        $extraOutput = Repo-Path "latency.txt"
+        if (!$isWindows) {
+            chmod +rw "$extraOutput"
+        }
     } elseif ($exeArgs.Contains("prate:1")) {
         $metric = "hps"
     }
 
-    $values = @(@(), @())
-    $hasFailures = $false
-    $tcpSupported = ($io -ne "xdp" -and $io -ne "wsk") ? 1 : 0
     for ($tcp = 0; $tcp -le $tcpSupported; $tcp++) {
 
     # Set up all the parameters and paths for running the test.
     $execMode = $ExeArgs.Substring(0, $ExeArgs.IndexOf(" ")) # First arg is the exec mode
     $clientPath = Repo-Path $SecNetPerfPath
     $serverArgs = "$execMode -io:$io"
-    $clientArgs = "-target:netperf-peer $ExeArgs -tcp:$tcp -trimout -watchdog:25000"
-    if ($io -eq "xdp") {
+    $clientArgs = "-target:$RemoteName $ExeArgs -tcp:$tcp -trimout -watchdog:25000"
+    if ($io -eq "xdp" -or $io -eq "qtip") {
         $serverArgs += " -pollidle:10000"
         $clientArgs += " -pollidle:10000"
     }
@@ -413,36 +659,40 @@ function Invoke-Secnetperf {
         $serverArgs += " -stats:1"
         $clientArgs += " -pconn:1"
     }
+    if ($extraOutput) {
+        $clientArgs += " -extraOutputFile:$extraOutput"
+    }
 
     if (!(Check-TestFilter $clientArgs $Filter)) {
         Write-Host "> secnetperf $clientArgs SKIPPED!"
         continue
     }
 
-    if ($io -eq "wsk" -and $metric -eq "hps") { # TODO - Figure out why this is crashing, and fix it.
+    # These scenarios are currently broken! TODO - Figure out why and fix them.
+    if ($io -eq "wsk" -and $metric -eq "hps") {
         Write-Host "> secnetperf $clientArgs BROKEN!"
         continue
     }
 
-    if ($io -eq "xdp" -and $metric -ne "hps") { # TODO - Figure out why this isn't working, and fix it.
-        Write-Host "> secnetperf $clientArgs BROKEN!"
-        continue
-    }
+     # Linux XDP requires sudo for now
+    $useSudo = (!$IsWindows -and $io -eq "xdp")
 
     $artifactName = $tcp -eq 0 ? "$TestId-quic" : "$TestId-tcp"
     New-Item -ItemType Directory "artifacts/logs/$artifactName" -ErrorAction Ignore | Out-Null
     $artifactDir = Repo-Path "artifacts/logs/$artifactName"
     $remoteArtifactDir = "$RemoteDir/artifacts/logs/$artifactName"
     New-Item -ItemType Directory $artifactDir -ErrorAction Ignore | Out-Null
-    Invoke-Command -Session $Session -ScriptBlock {
-        New-Item -ItemType Directory $Using:remoteArtifactDir -ErrorAction Ignore | Out-Null
+    if (!($Session -eq "NOT_SUPPORTED")) {
+        Invoke-Command -Session $Session -ScriptBlock {
+            New-Item -ItemType Directory $Using:remoteArtifactDir -ErrorAction Ignore | Out-Null
+        }
     }
 
     $clientOut = (Join-Path $artifactDir "client.console.log")
     $serverOut = (Join-Path $artifactDir "server.console.log")
 
     # Start logging on both sides, if configured.
-    if ($LogProfile -ne "" -and $LogProfile -ne "NULL") {
+    if ($LogProfile -ne "" -and $LogProfile -ne "NULL" -and !($Session -eq "NOT_SUPPORTED")) {
         Invoke-Command -Session $Session -ScriptBlock {
             try { & "$Using:RemoteDir/scripts/log.ps1" -Cancel } catch {} # Cancel any previous logging
             & "$Using:RemoteDir/scripts/log.ps1" -Start -Profile $Using:LogProfile -ProfileInScriptDirectory
@@ -457,7 +707,17 @@ function Invoke-Secnetperf {
 
     # Start the server running.
     "> secnetperf $serverArgs" | Add-Content $serverOut
-    $job = Start-RemoteServer $Session "$RemoteDir/$SecNetPerfPath $serverArgs"
+
+    $StateDir = "C:/_state"
+    if (!$IsWindows) {
+        $StateDir = "/etc/_state"
+    }
+    if ($Environment -eq "azure") {
+        Start-RemoteServerPassive $Session "$RemoteDir/$SecNetPerfPath $serverArgs" $StateDir $RunId $SyncerSecret
+        Wait-StartRemoteServerPassive "$clientPath" $RemoteName $artifactDir $useSudo
+    } else {
+        $job = Start-RemoteServer $Session "$RemoteDir/$SecNetPerfPath" $serverArgs $useSudo
+    }
 
     # Run the test multiple times, failing (for now) only if all tries fail.
     # TODO: Once all failures have been fixed, consider all errors fatal.
@@ -467,10 +727,16 @@ function Invoke-Secnetperf {
         Write-Host "==============================`nRUN $($try+1):"
         "> secnetperf $clientArgs" | Add-Content $clientOut
         try {
-            $process = Start-LocalTest $clientPath $clientArgs $artifactDir
+            $process = Start-LocalTest "$clientPath" $clientArgs $artifactDir $useSudo
             $rawOutput = Wait-LocalTest $process $artifactDir ($io -eq "wsk") 30000
             Write-Host $rawOutput
             $values[$tcp] += Get-TestOutput $rawOutput $metric
+            if ($extraOutput) {
+                if ($useSudo) {
+                    sudo chown $UserName $extraOutput
+                }
+                $latency[$tcp] += Get-LatencyOutput $extraOutput
+            }
             $rawOutput | Add-Content $clientOut
             $successCount++
         } catch {
@@ -490,7 +756,11 @@ function Invoke-Secnetperf {
         $testFailures = $true
     } finally {
         # Stop the server.
-        try { Stop-RemoteServer $job $RemoteName | Add-Content $serverOut } catch { }
+        if ($Environment -eq "azure") {
+            Stop-RemoteServerAsyncAwait $Session $StateDir $RemoteName $RunId $SyncerSecret
+        } else {
+            try { Stop-RemoteServer $job $RemoteName | Add-Content $serverOut } catch { }
+        }
 
         # Stop any logging and copy the logs to the artifacts folder.
         if ($LogProfile -ne "" -and $LogProfile -ne "NULL") {
@@ -521,6 +791,85 @@ function Invoke-Secnetperf {
     return [pscustomobject]@{
         Metric = $metric
         Values = $values
+        Latency = $latency
         HasFailures = $hasFailures
     }
+}
+
+function CheckRegressionResult($values, $testid, $transport, $regressionJson, $envStr) {
+
+    $sum = 0
+    foreach ($item in $values) {
+        $sum += $item
+    }
+    $avg = $sum / $values.Length
+    $Testid = "$testid-$transport"
+
+    $res = @{
+        Baseline = "N/A"
+        BestResult = "N/A"
+        BestResultCommit = "N/A"
+        CumulativeResult = "N/A"
+        AggregateFunction = "N/A"
+        HasRegression = $false
+    }
+
+    try {
+        $res.Baseline = $regressionJson.$Testid.$envStr.baseline
+        $res.BestResult = $regressionJson.$Testid.$envStr.BestResult
+        $res.BestResultCommit = $regressionJson.$Testid.$envStr.BestResultCommit
+        $res.CumulativeResult = $avg
+        $res.AggregateFunction = "AVG"
+
+        if ($avg -lt $res.Baseline) {
+            Write-GHError "Regression detected in $Testid for $envStr. See summary table for details."
+            $res.HasRegression = $true
+        }
+    } catch {
+        Write-Host "Not using a watermark-based regression method. Skipping."
+    }
+
+    return $res
+}
+
+function CheckRegressionLat($values, $regressionJson, $testid, $transport, $envStr) {
+
+    # TODO: Right now, we are not using a watermark based method for regression detection of latency percentile values because we don't know how to determine a "Best Ever" distribution.
+    #       (we are just looking at P0, P50, P99 columns, and computing the baseline for each percentile as the mean - 2 * std of the last 20 runs. )
+    #       So, the summary table omits a "BestEver" and "Baseline" column for latency. In fact, we ignore the "mean - 2*std" signal entirely. Need to determine how we compare distributions.
+
+    $RpsAvg = 0
+    $NumRuns = $values.Length / 9
+    for ($offset = 0; $offset -lt $values.Length; $offset += 9) {
+        $RpsAvg += $values[$offset + 8]
+    }
+
+    $RpsAvg /= $NumRuns
+    $Testid = "$testid-$transport"
+
+    $res = @{
+        Baseline = "N/A"
+        BestResult = "N/A"
+        BestResultCommit = "N/A"
+        CumulativeResult = "N/A"
+        AggregateFunction = "N/A"
+        HasRegression = $false
+    }
+
+    try {
+        $res.Baseline = $regressionJson.$Testid.$envStr.baseline
+        $res.BestResult = $regressionJson.$Testid.$envStr.BestResult
+        $res.BestResultCommit = $regressionJson.$Testid.$envStr.BestResultCommit
+        $res.CumulativeResult = $RpsAvg
+        $res.AggregateFunction = "AVG"
+
+        if ($RpsAvg -lt $res.Baseline) {
+            Write-GHError "RPS Regression detected in $Testid for $envStr. See summary table for details."
+            $res.HasRegression = $true
+        }
+    } catch {
+        Write-Host "Not using a watermark-based regression method."
+    }
+
+    return $res
 }

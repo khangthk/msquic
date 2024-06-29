@@ -2255,11 +2255,6 @@ SocketDelete(
     CXPLAT_DBG_ASSERT(!Socket->Uninitialized);
     Socket->Uninitialized = TRUE;
 
-    if (Socket->UseTcp) {
-        CxPlatSocketRelease(Socket);
-        return;
-    }
-
     const uint16_t SocketCount =
         Socket->NumPerProcessorSockets ? (uint16_t)CxPlatProcCount() : 1;
     for (uint16_t i = 0; i < SocketCount; ++i) {
@@ -2569,6 +2564,7 @@ CxPlatDataPathSocketProcessAcceptCompletion(
 {
     CXPLAT_SOCKET_PROC* ListenerSocketProc = CONTAINING_RECORD(Sqe, CXPLAT_SOCKET_PROC, IoSqe);
     ULONG IoResult = RtlNtStatusToDosError((NTSTATUS)Cqe->Internal);
+    CXPLAT_SOCKET_PROC* AcceptSocketProc = NULL;
 
     if (IoResult == WSAENOTSOCK || IoResult == WSA_OPERATION_ABORTED) {
         //
@@ -2584,7 +2580,7 @@ CxPlatDataPathSocketProcessAcceptCompletion(
 
     if (IoResult == QUIC_STATUS_SUCCESS) {
         CXPLAT_DBG_ASSERT(ListenerSocketProc->AcceptSocket != NULL);
-        CXPLAT_SOCKET_PROC* AcceptSocketProc = &ListenerSocketProc->AcceptSocket->PerProcSockets[0];
+        AcceptSocketProc = &ListenerSocketProc->AcceptSocket->PerProcSockets[0];
         CXPLAT_DBG_ASSERT(ListenerSocketProc->AcceptSocket == AcceptSocketProc->Parent);
         DWORD BytesReturned;
         SOCKET_PROCESSOR_AFFINITY RssAffinity = { 0 };
@@ -2596,6 +2592,11 @@ CxPlatDataPathSocketProcessAcceptCompletion(
             ListenerSocketProc->Parent,
             0,
             "AcceptEx Completed!");
+
+
+        if (!CxPlatRundownAcquire(&AcceptSocketProc->RundownRef)) {
+            goto Error;
+        }
 
         int Result =
             setsockopt(
@@ -2651,15 +2652,15 @@ CxPlatDataPathSocketProcessAcceptCompletion(
             goto Error;
         }
 
-        CxPlatDataPathStartReceiveAsync(AcceptSocketProc);
-
-        AcceptSocketProc->IoStarted = TRUE;
         Datapath->TcpHandlers.Accept(
             ListenerSocketProc->Parent,
             ListenerSocketProc->Parent->ClientContext,
             ListenerSocketProc->AcceptSocket,
             &ListenerSocketProc->AcceptSocket->ClientContext);
         ListenerSocketProc->AcceptSocket = NULL;
+
+        AcceptSocketProc->IoStarted = TRUE;
+        CxPlatDataPathStartReceiveAsync(AcceptSocketProc);
 
     } else {
         QuicTraceEvent(
@@ -2671,6 +2672,10 @@ CxPlatDataPathSocketProcessAcceptCompletion(
     }
 
 Error:
+
+    if (AcceptSocketProc != NULL) {
+        CxPlatRundownRelease(&AcceptSocketProc->RundownRef);
+    }
 
     if (ListenerSocketProc->AcceptSocket != NULL) {
         SocketDelete(ListenerSocketProc->AcceptSocket);
@@ -4304,6 +4309,76 @@ CxPlatDataPathStartRioSends(
             &SendData->LocalAddress,
             SendData);
     }
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+QUIC_STATUS
+CxPlatSocketGetTcpStatistics(
+    _In_ CXPLAT_SOCKET* Socket,
+    _Out_ CXPLAT_TCP_STATISTICS* Statistics
+    )
+{
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS5)
+    CXPLAT_SOCKET_PROC* SocketProc = &Socket->PerProcSockets[0];
+    DWORD Version = 1;
+    TCP_INFO_v1 Info = { 0 };
+    DWORD InfoSize = sizeof(Info);
+    int Result =
+        WSAIoctl(
+            SocketProc->Socket,
+            SIO_TCP_INFO,
+            &Version,
+            sizeof(Version),
+            &Info,
+            InfoSize,
+            &InfoSize,
+            NULL,
+            NULL);
+    if (Result == SOCKET_ERROR) { // TODO - Support fallback to v0?
+        int WsaError = WSAGetLastError();
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[data][%p] ERROR, %u, %s.",
+            SocketProc->Parent,
+            WsaError,
+            "WSAIoctl TCP_INFO_v1");
+        return HRESULT_FROM_WIN32(WsaError);
+    }
+
+    Statistics->Mss = Info.Mss;
+    Statistics->ConnectionTimeMs = Info.ConnectionTimeMs;
+    Statistics->TimestampsEnabled = Info.TimestampsEnabled;
+    Statistics->RttUs = Info.RttUs;
+    Statistics->MinRttUs = Info.MinRttUs;
+    Statistics->BytesInFlight = Info.BytesInFlight;
+    Statistics->Cwnd = Info.Cwnd;
+    Statistics->SndWnd = Info.SndWnd;
+    Statistics->RcvWnd = Info.RcvWnd;
+    Statistics->RcvBuf = Info.RcvBuf;
+    Statistics->BytesOut = Info.BytesOut;
+    Statistics->BytesIn = Info.BytesIn;
+    Statistics->BytesReordered = Info.BytesReordered;
+    Statistics->BytesRetrans = Info.BytesRetrans;
+    Statistics->FastRetrans = Info.FastRetrans;
+    Statistics->DupAcksIn = Info.DupAcksIn;
+    Statistics->TimeoutEpisodes = Info.TimeoutEpisodes;
+    Statistics->SynRetrans = Info.SynRetrans;
+    Statistics->SndLimTransRwin = Info.SndLimTransRwin;
+    Statistics->SndLimTimeRwin = Info.SndLimTimeRwin;
+    Statistics->SndLimTransCwnd = Info.SndLimTransCwnd;
+    Statistics->SndLimTimeCwnd = Info.SndLimTimeCwnd;
+    Statistics->SndLimTransSnd = Info.SndLimTransSnd;
+    Statistics->SndLimTimeSnd = Info.SndLimTimeSnd;
+    Statistics->SndLimBytesRwin = Info.SndLimBytesRwin;
+    Statistics->SndLimBytesCwnd = Info.SndLimBytesCwnd;
+    Statistics->SndLimBytesSnd = Info.SndLimBytesSnd;
+
+    return QUIC_STATUS_SUCCESS;
+#else
+    UNREFERENCED_PARAMETER(Socket);
+    UNREFERENCED_PARAMETER(Statistics);
+    return QUIC_STATUS_NOT_SUPPORTED;
+#endif
 }
 
 void

@@ -58,7 +58,7 @@ jobs:
     runs-on: ${{ inputs.os }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
       with:
         repository: microsoft/msquic
         ref: ${{ inputs.ref }}
@@ -66,7 +66,7 @@ jobs:
       shell: pwsh
       run: scripts/prepare-machine.ps1 -ForBuild -ForKernel
     - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@031090342aeefe171e49f3820f3b52110c66e402
+      uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
     - name: Nuget Restore
       shell: pwsh
       run: msbuild msquic.kernel.sln -t:restore /p:RestorePackagesConfig=true /p:Configuration=${{ inputs.config }} /p:Platform=${{ inputs.arch }}
@@ -88,7 +88,7 @@ jobs:
         Remove-Item artifacts/corenet-ci-main -Recurse -Force -ErrorAction Ignore
         Remove-Item artifacts/xdp -Recurse -Force -ErrorAction Ignore
     - name: Upload build artifacts
-      uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
+      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
       with:
         name: ${{ inputs.config }}-${{ inputs.plat }}-${{ inputs.os }}-${{ inputs.arch }}-${{ inputs.tls }}${{ inputs.build }}
         path: artifacts

@@ -198,6 +198,16 @@ InterlockedFetchAndSetBoolean(
 
 inline
 void*
+InterlockedExchangePointer(
+    _Inout_ _Interlocked_operand_ void* volatile *Target,
+    _In_opt_ void* Value
+    )
+{
+    return __sync_lock_test_and_set(Target, Value);
+}
+
+inline
+void*
 InterlockedFetchAndClearPointer(
     _Inout_ _Interlocked_operand_ void* volatile *Target
     )
@@ -298,6 +308,7 @@ CxPlatLogAssert(
 
 #define CXPLAT_IRQL() 0
 #define CXPLAT_PASSIVE_CODE()
+#define CXPLAT_AT_DISPATCH() FALSE
 
 //
 // Memory management interfaces.
@@ -868,6 +879,8 @@ CxPlatInternalEventWaitWithTimeout(
     BOOLEAN WaitSatisfied = FALSE;
     struct timespec Ts = {0, 0};
     int Result;
+
+    CXPLAT_DBG_ASSERT(TimeoutMs != UINT32_MAX);
 
     //
     // Get absolute time.

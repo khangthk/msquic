@@ -194,6 +194,12 @@ typedef union QUIC_CONNECTION_STATE {
         //
         BOOLEAN TimestampRecvNegotiated : 1;
 
+        //
+        // Indicates we received APPLICATION_ERROR transport error and are checking also
+        // later packets in case they contain CONNECTION_CLOSE frame with application-layer error.
+        //
+        BOOLEAN DelayedApplicationError : 1;
+
 #ifdef CxPlatVerifierEnabledByAddr
         //
         // The calling app is being verified (app or driver verifier).
@@ -391,6 +397,11 @@ typedef struct QUIC_CONNECTION {
     // Number of non-retired desintation CIDs we currently have cached.
     //
     uint8_t DestCidCount;
+
+    //
+    // Number of retired desintation CIDs we currently have cached.
+    //
+    uint8_t RetiredDestCidCount;
 
     //
     // The maximum number of source CIDs to give the peer. This is a minimum of
@@ -670,7 +681,9 @@ typedef struct QUIC_SERIALIZED_RESUMPTION_STATE {
     1024 /* Extra QUIC stuff */ \
 )
 
-#ifdef CxPlatVerifierEnabledByAddr
+#if DEBUG // Enable all verifier checks in debug builds
+#define QUIC_CONN_VERIFY(Connection, Expr) CXPLAT_FRE_ASSERT(Expr)
+#elif defined(CxPlatVerifierEnabledByAddr)
 #define QUIC_CONN_VERIFY(Connection, Expr) \
     if (Connection->State.IsVerifying) { CXPLAT_FRE_ASSERT(Expr); }
 #elif defined(CxPlatVerifierEnabled)
@@ -1140,6 +1153,13 @@ QuicConnDrainOperations(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 void
 QuicConnQueueOper(
+    _In_ QUIC_CONNECTION* Connection,
+    _In_ QUIC_OPERATION* Oper
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+void
+QuicConnQueuePriorityOper(
     _In_ QUIC_CONNECTION* Connection,
     _In_ QUIC_OPERATION* Oper
     );
