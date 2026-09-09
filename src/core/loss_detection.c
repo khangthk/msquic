@@ -396,7 +396,8 @@ QuicLossDetectionOnPacketSent(
     //
     QUIC_SENT_PACKET_METADATA* SentPacket =
         QuicSentPacketPoolGetPacketMetadata(
-            &Connection->Worker->SentPacketPool, TempSentPacket->FrameCount);
+            &Connection->Partition->SentPacketPool,
+            TempSentPacket->FrameCount);
     if (SentPacket == NULL) {
         //
         // We can't allocate the memory to permanently track this packet so just
@@ -829,25 +830,11 @@ QuicLossDetectionRetransmitFrames(
             uint8_t PathIndex;
             QUIC_PATH* Path = QuicConnGetPathByID(Connection, Packet->PathId, &PathIndex);
             if (Path != NULL && !Path->IsPeerValidated) {
-                uint64_t TimeNow = CxPlatTimeUs64();
-                CXPLAT_DBG_ASSERT(Connection->Configuration != NULL);
-                uint64_t ValidationTimeout =
-                    CXPLAT_MAX(QuicLossDetectionComputeProbeTimeout(LossDetection, Path, 3),
-                        6 * MS_TO_US(Connection->Settings.InitialRttMs));
-                if (CxPlatTimeDiff64(Path->PathValidationStartTime, TimeNow) > ValidationTimeout) {
-                    QuicTraceLogConnInfo(
-                        PathValidationTimeout,
-                        Connection,
-                        "Path[%hhu] validation timed out",
-                        Path->ID);
-                    QuicPerfCounterIncrement(QUIC_PERF_COUNTER_PATH_FAILURE);
-                    QuicPathRemove(Connection, PathIndex);
-                } else {
-                    Path->SendChallenge = TRUE;
+                Path->SendChallenge = TRUE;
+                NewDataQueued |=
                     QuicSendSetSendFlag(
                         &Connection->Send,
                         QUIC_CONN_SEND_FLAG_PATH_CHALLENGE);
-                }
             }
             break;
         }
@@ -1024,7 +1011,8 @@ QuicLossDetectionDetectAndHandleLostPackets(
             }
 
             Connection->Stats.Send.SuspectedLostPackets++;
-            QuicPerfCounterIncrement(QUIC_PERF_COUNTER_PKTS_SUSPECTED_LOST);
+            QuicPerfCounterIncrement(
+                Connection->Partition, QUIC_PERF_COUNTER_PKTS_SUSPECTED_LOST);
             if (Packet->Flags.IsAckEliciting) {
                 LossDetection->PacketsInFlight--;
                 LostRetransmittableBytes += Packet->PacketLength;
@@ -1293,7 +1281,7 @@ QuicLossDetectionOnZeroRttRejected(
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
-void
+BOOLEAN
 QuicLossDetectionProcessAckBlocks(
     _In_ QUIC_LOSS_DETECTION* LossDetection,
     _In_ QUIC_PATH* Path,
@@ -1301,10 +1289,10 @@ QuicLossDetectionProcessAckBlocks(
     _In_ QUIC_ENCRYPT_LEVEL EncryptLevel,
     _In_ uint64_t AckDelay,
     _In_ QUIC_RANGE* AckBlocks,
-    _Out_ BOOLEAN* InvalidAckBlock,
     _In_opt_ QUIC_ACK_ECN_EX* Ecn
     )
 {
+    BOOLEAN Result = TRUE;
     QUIC_SENT_PACKET_METADATA* AckedPackets = NULL;
     QUIC_SENT_PACKET_METADATA** AckedPacketsTail = &AckedPackets;
 
@@ -1317,8 +1305,6 @@ QuicLossDetectionProcessAckBlocks(
     BOOLEAN NewLargestAckDifferentPath = FALSE;
     uint64_t NewLargestAckTimestamp = 0;
 
-    *InvalidAckBlock = FALSE;
-
     QUIC_SENT_PACKET_METADATA** LostPacketsStart = &LossDetection->LostPackets;
     QUIC_SENT_PACKET_METADATA** SentPacketsStart = &LossDetection->SentPackets;
     QUIC_SENT_PACKET_METADATA* LargestAckedPacket = NULL;
@@ -1326,12 +1312,35 @@ QuicLossDetectionProcessAckBlocks(
     uint32_t i = 0;
     QUIC_SUBRANGE* AckBlock;
     while ((AckBlock = QuicRangeGetSafe(AckBlocks, i++)) != NULL) {
+        //
+        // ATTACK DETECTION: Check if the skipped packet number is in this ACK
+        // block. If so, this indicates a potential injection attack.
+        //
+        if (Connection->Send.SkippedPacketNumber >= AckBlock->Low &&
+            Connection->Send.SkippedPacketNumber <= QuicRangeGetHigh(AckBlock)) {
+            QuicTraceLogConnError(
+                AttackDetected,
+                Connection,
+                "Attack detected: Skipped packet number %llu ACKed in range [%llu, %llu]",
+                Connection->Send.SkippedPacketNumber,
+                AckBlock->Low,
+                QuicRangeGetHigh(AckBlock));
+            Result = FALSE;
+            goto Exit;
+        }
 
         //
         // Check to see if any packets in the LostPackets list are acknowledged,
         // which would mean we mistakenly classified those packets as lost.
         //
         if (*LostPacketsStart != NULL) {
+            QUIC_SENT_PACKET_METADATA* LastLostPacket =
+                CXPLAT_CONTAINING_RECORD(
+                    LossDetection->LostPacketsTail, QUIC_SENT_PACKET_METADATA,
+                    Next);
+            if (LastLostPacket->PacketNumber < AckBlock->Low) {
+                goto CheckSentPackets;
+            }
             while (*LostPacketsStart && (*LostPacketsStart)->PacketNumber < AckBlock->Low) {
                 LostPacketsStart = &((*LostPacketsStart)->Next);
             }
@@ -1344,7 +1353,8 @@ QuicLossDetectionProcessAckBlocks(
                     PtkConnPre(Connection),
                     (*End)->PacketNumber);
                 Connection->Stats.Send.SpuriousLostPackets++;
-                QuicPerfCounterDecrement(QUIC_PERF_COUNTER_PKTS_SUSPECTED_LOST);
+                QuicPerfCounterDecrement(
+                    Connection->Partition, QUIC_PERF_COUNTER_PKTS_SUSPECTED_LOST);
                 //
                 // NOTE: we don't increment AckedRetransmittableBytes here
                 // because we already told the congestion control module that
@@ -1380,6 +1390,7 @@ QuicLossDetectionProcessAckBlocks(
             }
         }
 
+CheckSentPackets:
         //
         // Now find all the acknowledged packets in the SentPackets list.
         //
@@ -1432,7 +1443,7 @@ QuicLossDetectionProcessAckBlocks(
         //
         // Nothing was acknowledged, so we can exit now.
         //
-        return;
+        goto Exit;
     }
 
     uint64_t LargestAckedPacketNum = 0;
@@ -1454,8 +1465,8 @@ QuicLossDetectionProcessAckBlocks(
                 "[conn][%p] ERROR, %s.",
                 Connection,
                 "Incorrect ACK encryption level");
-            *InvalidAckBlock = TRUE;
-            return;
+            Result = FALSE;
+            goto Exit;
         }
 
         uint64_t PacketRtt = CxPlatTimeDiff64(PacketMeta->SentTime, TimeNow);
@@ -1613,18 +1624,28 @@ QuicLossDetectionProcessAckBlocks(
 
     LossDetection->ProbeCount = 0;
 
+Exit:
+
+    if (!Result) {
+        //
+        // A protocol violation was detected; fail the connection.
+        //
+        QuicConnTransportError(Connection, QUIC_ERROR_PROTOCOL_VIOLATION);
+    }
+
     AckedPacketsIterator = AckedPackets;
     while (AckedPacketsIterator != NULL) {
         QUIC_SENT_PACKET_METADATA* PacketMeta = AckedPacketsIterator;
         AckedPacketsIterator = AckedPacketsIterator->Next;
         QuicSentPacketPoolReturnPacketMetadata(PacketMeta, Connection);
     }
-
     //
     // At least one packet was ACKed. If all packets were ACKed then we'll
     // cancel the timer; otherwise we'll reset the timer.
     //
     QuicLossDetectionUpdateTimer(LossDetection, FALSE);
+
+    return Result;
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -1680,15 +1701,16 @@ QuicLossDetectionProcessAckFrame(
 
             AckDelay <<= Connection->PeerTransportParams.AckDelayExponent;
 
-            QuicLossDetectionProcessAckBlocks(
-                LossDetection,
-                Path,
-                Packet,
-                EncryptLevel,
-                AckDelay,
-                &Connection->DecodedAckRanges,
-                InvalidFrame,
-                FrameType == QUIC_FRAME_ACK_1 ? &Ecn : NULL);
+            if (!QuicLossDetectionProcessAckBlocks(
+                    LossDetection,
+                    Path,
+                    Packet,
+                    EncryptLevel,
+                    AckDelay,
+                    &Connection->DecodedAckRanges,
+                    FrameType == QUIC_FRAME_ACK_1 ? &Ecn : NULL)) {
+                Result = FALSE;
+            }
         }
     }
 

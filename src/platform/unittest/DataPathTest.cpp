@@ -19,8 +19,9 @@ Abstract:
 #include "DataPathTest.cpp.clog.h"
 #endif
 
+#define QUIC_INVALID_FILE_HANDLE (-1)
+
 extern bool UseDuoNic;
-extern CXPLAT_WORKER_POOL WorkerPool;
 
 //
 // Connect to the duonic address (if using duonic) or localhost (if not).
@@ -59,14 +60,17 @@ struct QuicAddr
     }
 
     void Resolve(QUIC_ADDRESS_FAMILY af, const char* hostname) {
+        CXPLAT_WORKER_POOL* WorkerPool = CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
         CXPLAT_DATAPATH* Datapath = nullptr;
+        CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+        InitConfig.EnableDscpOnRecv = TRUE;
         if (QUIC_FAILED(
             CxPlatDataPathInitialize(
                 0,
                 NULL,
                 NULL,
-                &WorkerPool,
-                NULL,
+                WorkerPool,
+                &InitConfig,
                 &Datapath))) {
             GTEST_FATAL_FAILURE_(" QuicDataPathInitialize failed.");
         }
@@ -79,6 +83,7 @@ struct QuicAddr
             GTEST_FATAL_FAILURE_("Failed to resolve IP address.");
         }
         CxPlatDataPathUninitialize(Datapath);
+        CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
     }
 };
 
@@ -86,6 +91,9 @@ struct UdpRecvContext {
     QUIC_ADDR DestinationAddress;
     CXPLAT_EVENT ClientCompletion;
     CXPLAT_ECN_TYPE EcnType {CXPLAT_ECN_NON_ECT};
+    CXPLAT_DSCP_TYPE Dscp {CXPLAT_DSCP_CS0};
+    bool TtlSupported;
+    bool DscpSupported;
     UdpRecvContext() {
         CxPlatEventInitialize(&ClientCompletion, FALSE, FALSE);
     }
@@ -95,13 +103,13 @@ struct UdpRecvContext {
 };
 
 struct TcpClientContext {
-    bool Connected : 1;
-    bool Disconnected : 1;
-    bool Received : 1;
+    bool Connected{};
+    bool Disconnected{};
+    bool Received{};
     CXPLAT_EVENT ConnectEvent;
     CXPLAT_EVENT DisconnectEvent;
     CXPLAT_EVENT ReceiveEvent;
-    TcpClientContext() : Connected(false), Disconnected(false), Received(false) {
+    TcpClientContext() {
         CxPlatEventInitialize(&ConnectEvent, FALSE, FALSE);
         CxPlatEventInitialize(&DisconnectEvent, FALSE, FALSE);
         CxPlatEventInitialize(&ReceiveEvent, FALSE, FALSE);
@@ -114,13 +122,13 @@ struct TcpClientContext {
 };
 
 struct TcpListenerContext {
-    CXPLAT_SOCKET* Server;
-    TcpClientContext ServerContext;
-    bool Accepted : 1;
-    bool Reject : 1;
-    bool Rejected : 1;
-    CXPLAT_EVENT AcceptEvent;
-    TcpListenerContext() : Server(nullptr), Accepted(false), Reject{false}, Rejected{false} {
+    CXPLAT_SOCKET* Server{};
+    TcpClientContext ServerContext{};
+    bool Accepted{};
+    bool Reject{};
+    bool Rejected{};
+    CXPLAT_EVENT AcceptEvent{};
+    TcpListenerContext() {
         CxPlatEventInitialize(&AcceptEvent, FALSE, FALSE);
     }
     ~TcpListenerContext() {
@@ -286,18 +294,29 @@ protected:
     {
         UdpRecvContext* RecvContext = (UdpRecvContext*)Context;
         ASSERT_NE(nullptr, RecvContext);
-
         CXPLAT_RECV_DATA* RecvData = RecvDataChain;
 
         while (RecvData != NULL) {
             ASSERT_EQ(RecvData->BufferLength, ExpectedDataSize);
             ASSERT_EQ(0, memcmp(RecvData->Buffer, ExpectedData, ExpectedDataSize));
 
+            if (RecvContext->TtlSupported) {
+                ASSERT_TRUE(RecvData->HopLimitTTL > 0);
+            } else {
+                ASSERT_EQ(0, RecvData->HopLimitTTL);
+            }
+
+            if (RecvContext->DscpSupported) {
+                ASSERT_EQ(CXPLAT_DSCP_FROM_TOS(RecvData->TypeOfService), RecvContext->Dscp);
+            } else {
+                ASSERT_EQ(CXPLAT_DSCP_FROM_TOS(RecvData->TypeOfService), 0);
+            }
+
             if (RecvData->Route->LocalAddress.Ipv4.sin_port == RecvContext->DestinationAddress.Ipv4.sin_port) {
 
-                ASSERT_EQ((CXPLAT_ECN_TYPE)RecvData->TypeOfService, RecvContext->EcnType);
+                ASSERT_EQ(CXPLAT_ECN_FROM_TOS(RecvData->TypeOfService), RecvContext->EcnType);
 
-                CXPLAT_SEND_CONFIG SendConfig = { RecvData->Route, 0, (uint8_t)RecvContext->EcnType, 0 };
+                CXPLAT_SEND_CONFIG SendConfig = { RecvData->Route, 0, (uint8_t)RecvContext->EcnType, 0, (uint8_t)RecvContext->Dscp };
                 auto ServerSendData = CxPlatSendDataAlloc(Socket, &SendConfig);
                 ASSERT_NE(nullptr, ServerSendData);
                 auto ServerBuffer = CxPlatSendDataAllocBuffer(ServerSendData, ExpectedDataSize);
@@ -435,40 +454,60 @@ QuicAddr DataPathTest::UnspecIPv4;
 QuicAddr DataPathTest::UnspecIPv6;
 
 struct CxPlatDataPath {
-    QUIC_EXECUTION_CONFIG DefaultExecutionConfig { QUIC_EXECUTION_CONFIG_FLAG_NONE, 0, 0, {0} };
+    QUIC_GLOBAL_EXECUTION_CONFIG DefaultExecutionConfig { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, 0, 0, {0} };
+    CXPLAT_WORKER_POOL* WorkerPool {nullptr};
     CXPLAT_DATAPATH* Datapath {nullptr};
     QUIC_STATUS InitStatus;
     CxPlatDataPath(
         _In_opt_ const CXPLAT_UDP_DATAPATH_CALLBACKS* UdpCallbacks,
         _In_opt_ const CXPLAT_TCP_DATAPATH_CALLBACKS* TcpCallbacks = nullptr,
         _In_ uint32_t ClientRecvContextLength = 0,
-        _In_opt_ QUIC_EXECUTION_CONFIG* Config = nullptr
+        _In_opt_ QUIC_GLOBAL_EXECUTION_CONFIG* Config = nullptr
         ) noexcept
     {
-        if (UseDuoNic && Config == nullptr) {
-            DefaultExecutionConfig.Flags = QUIC_EXECUTION_CONFIG_FLAG_XDP;
-        }
+        WorkerPool =
+            CxPlatWorkerPoolCreate(Config ? Config : &DefaultExecutionConfig, CXPLAT_WORKER_POOL_REF_TOOL);
+        CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+        InitConfig.EnableDscpOnRecv = TRUE;
         InitStatus =
             CxPlatDataPathInitialize(
                 ClientRecvContextLength,
                 UdpCallbacks,
                 TcpCallbacks,
-                &WorkerPool,
-                Config ? Config : &DefaultExecutionConfig,
+                WorkerPool,
+                &InitConfig,
                 &Datapath);
     }
     ~CxPlatDataPath() noexcept {
         if (Datapath) {
             CxPlatDataPathUninitialize(Datapath);
         }
+        CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
     }
     QUIC_STATUS GetInitStatus() const noexcept { return InitStatus; }
     bool IsValid() const { return QUIC_SUCCEEDED(InitStatus); }
     CxPlatDataPath(CxPlatDataPath& other) = delete;
     CxPlatDataPath operator=(CxPlatDataPath& Other) = delete;
     operator CXPLAT_DATAPATH* () const noexcept { return Datapath; }
-    uint32_t GetSupportedFeatures() const noexcept { return CxPlatDataPathGetSupportedFeatures(Datapath); }
-    bool IsSupported(uint32_t feature) const noexcept { return static_cast<bool>(GetSupportedFeatures() & feature); }
+    CXPLAT_DATAPATH_FEATURES
+    GetSupportedFeatures(
+        CXPLAT_SOCKET_FLAGS SocketFlags = CXPLAT_SOCKET_FLAG_NONE
+        ) const noexcept {
+        return CxPlatDataPathGetSupportedFeatures(Datapath, SocketFlags);
+    }
+    bool
+    IsSupported(
+        CXPLAT_DATAPATH_FEATURES feature,
+        CXPLAT_SOCKET_FLAGS SocketFlags = CXPLAT_SOCKET_FLAG_NONE
+        ) const noexcept {
+        return static_cast<bool>(GetSupportedFeatures(SocketFlags) & feature);
+    }
+    bool
+    IsDscpSupported() const noexcept {
+        return
+            IsSupported(CXPLAT_DATAPATH_FEATURE_SEND_DSCP) &&
+            IsSupported(CXPLAT_DATAPATH_FEATURE_RECV_DSCP);
+    }
 };
 
 static
@@ -494,13 +533,14 @@ struct CxPlatSocket {
     CXPLAT_SOCKET* Socket {nullptr};
     QUIC_STATUS InitStatus {QUIC_STATUS_INVALID_STATE};
     CXPLAT_ROUTE Route {0};
+    uint8_t CibirIdLength {0};
     CxPlatSocket() { }
     CxPlatSocket(
         _In_ CxPlatDataPath& Datapath,
         _In_opt_ const QUIC_ADDR* LocalAddress = nullptr,
         _In_opt_ const QUIC_ADDR* RemoteAddress = nullptr,
         _In_opt_ void* CallbackContext = nullptr,
-        _In_ uint32_t InternalFlags = 0
+        _In_ CXPLAT_SOCKET_FLAGS InternalFlags = CXPLAT_SOCKET_FLAG_NONE
         ) noexcept // UDP
     {
         CreateUdp(
@@ -525,7 +565,7 @@ struct CxPlatSocket {
         _In_opt_ const QUIC_ADDR* LocalAddress = nullptr,
         _In_opt_ const QUIC_ADDR* RemoteAddress = nullptr,
         _In_opt_ void* CallbackContext = nullptr,
-        _In_ uint32_t InternalFlags = 0
+        _In_ CXPLAT_SOCKET_FLAGS InternalFlags = CXPLAT_SOCKET_FLAG_NONE
         ) noexcept
     {
         CXPLAT_UDP_CONFIG UdpConfig = {0};
@@ -534,6 +574,7 @@ struct CxPlatSocket {
         UdpConfig.Flags = InternalFlags;
         UdpConfig.InterfaceIndex = 0;
         UdpConfig.CallbackContext = CallbackContext;
+        UdpConfig.CibirIdLength = CibirIdLength;
         InitStatus =
             CxPlatSocketCreateUdp(
                 Datapath,
@@ -660,29 +701,29 @@ TEST_F(DataPathTest, Initialize)
         ASSERT_NE(nullptr, Datapath.Datapath);
     }
     {
-        QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 0 };
+        QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 0 };
         CxPlatDataPath Datapath(&EmptyUdpCallbacks, nullptr, 0, &Config);
         VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
         ASSERT_NE(nullptr, Datapath.Datapath);
     }
     {
-        QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_NONE, 0, 0 };
+        QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, 0, 0 };
         CxPlatDataPath Datapath(&EmptyUdpCallbacks, nullptr, 0, &Config);
         VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
         ASSERT_NE(nullptr, Datapath.Datapath);
     }
     {
-        QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 1, {0} };
+        QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 1, {0} };
         CxPlatDataPath Datapath(&EmptyUdpCallbacks, nullptr, 0, &Config);
         VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
         ASSERT_NE(nullptr, Datapath.Datapath);
     }
     if (UseDuoNic) {
-        QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_XDP, 0, 1, {0} };
+        QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, 0, 1, {0} };
         CxPlatDataPath Datapath(&EmptyUdpCallbacks, nullptr, 0, &Config);
         VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
         ASSERT_NE(nullptr, Datapath.Datapath);
-        ASSERT_TRUE(Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_RAW));
+        ASSERT_TRUE(Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_RAW, CXPLAT_SOCKET_FLAG_XDP));
     }
 }
 
@@ -775,8 +816,12 @@ TEST_P(DataPathTest, UdpData)
 {
     UdpRecvContext RecvContext;
     CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
     VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
     ASSERT_NE(nullptr, Datapath.Datapath);
+
+    RecvContext.Dscp = RecvContext.DscpSupported ? CXPLAT_DSCP_LE : CXPLAT_DSCP_CS0;
 
     auto unspecAddress = GetNewUnspecAddr();
     CxPlatSocket Server(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
@@ -796,7 +841,7 @@ TEST_P(DataPathTest, UdpData)
     VERIFY_QUIC_SUCCESS(Client.GetInitStatus());
     ASSERT_NE(nullptr, Client.Socket);
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
     auto ClientSendData = CxPlatSendDataAlloc(Client, &SendConfig);
     ASSERT_NE(nullptr, ClientSendData);
     auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -807,13 +852,58 @@ TEST_P(DataPathTest, UdpData)
     ASSERT_TRUE(CxPlatEventWaitWithTimeout(RecvContext.ClientCompletion, 2000));
 }
 
+#ifdef _WIN32
+TEST_P(DataPathTest, UdpDataShareCibirUdpPort) {
+    UdpRecvContext RecvContext;
+    CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
+    auto unspecAddress = GetNewUnspecAddr();
+    CxPlatSocket Server1;
+    Server1.CreateUdp(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
+    while (Server1.GetInitStatus() == QUIC_STATUS_ADDRESS_IN_USE) {
+        unspecAddress.SockAddr.Ipv4.sin_port = GetNextPort();
+        Server1.CreateUdp(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
+    }
+    VERIFY_QUIC_SUCCESS(Server1.GetInitStatus());
+    ASSERT_NE(nullptr, Server1.Socket);
+
+    //
+    // Try creating a CIBIR-aware socket on the same port.
+    //
+    CxPlatSocket Server2;
+    Server2.CibirIdLength = 6;
+    Server2.CreateUdp(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext, CXPLAT_SOCKET_FLAG_XDP);
+
+    if (UseDuoNic) {
+        VERIFY_QUIC_SUCCESS(Server2.GetInitStatus());
+        ASSERT_NE(nullptr, Server2.Socket);
+    } else {
+        //
+        // If XDP is not supported, the CIBIR-aware socket should fail to bind to the same port as the non-CIBIR-aware socket.
+        //
+        ASSERT_EQ(QUIC_STATUS_ADDRESS_IN_USE, Server2.GetInitStatus());
+    }
+
+    //
+    // Try creating a non-CIBIR-aware socket on the same port.
+    //
+    CxPlatSocket Server3;
+    Server3.CreateUdp(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
+    ASSERT_EQ(QUIC_STATUS_ADDRESS_IN_USE, Server3.GetInitStatus());
+}
+#endif
+
 TEST_P(DataPathTest, UdpDataPolling)
 {
-    QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 0 };
+    QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, UINT32_MAX, 0 };
     UdpRecvContext RecvContext;
     CxPlatDataPath Datapath(&UdpRecvCallbacks, nullptr, 0, &Config);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
     VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
     ASSERT_NE(nullptr, Datapath.Datapath);
+
+     RecvContext.Dscp = RecvContext.DscpSupported ? CXPLAT_DSCP_LE : CXPLAT_DSCP_CS0;
 
     auto unspecAddress = GetNewUnspecAddr();
     CxPlatSocket Server(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
@@ -833,7 +923,7 @@ TEST_P(DataPathTest, UdpDataPolling)
     VERIFY_QUIC_SUCCESS(Client.GetInitStatus());
     ASSERT_NE(nullptr, Client.Socket);
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
     auto ClientSendData = CxPlatSendDataAlloc(Client, &SendConfig);
     ASSERT_NE(nullptr, ClientSendData);
     auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -848,8 +938,12 @@ TEST_P(DataPathTest, UdpDataRebind)
 {
     UdpRecvContext RecvContext;
     CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
     VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
     ASSERT_NE(nullptr, Datapath.Datapath);
+
+     RecvContext.Dscp = RecvContext.DscpSupported ? CXPLAT_DSCP_LE : CXPLAT_DSCP_CS0;
 
     auto unspecAddress = GetNewUnspecAddr();
     CxPlatSocket Server(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
@@ -870,7 +964,7 @@ TEST_P(DataPathTest, UdpDataRebind)
         VERIFY_QUIC_SUCCESS(Client.GetInitStatus());
         ASSERT_NE(nullptr, Client.Socket);
 
-        CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+        CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
         auto ClientSendData = CxPlatSendDataAlloc(Client, &SendConfig);
         ASSERT_NE(nullptr, ClientSendData);
         auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -887,7 +981,7 @@ TEST_P(DataPathTest, UdpDataRebind)
         VERIFY_QUIC_SUCCESS(Client.GetInitStatus());
         ASSERT_NE(nullptr, Client.Socket);
 
-        CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+        CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
         auto ClientSendData = CxPlatSendDataAlloc(Client, &SendConfig);
         ASSERT_NE(nullptr, ClientSendData);
         auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -904,8 +998,12 @@ TEST_P(DataPathTest, UdpDataECT0)
     UdpRecvContext RecvContext;
     RecvContext.EcnType = CXPLAT_ECN_ECT_0;
     CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
     VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
     ASSERT_NE(nullptr, Datapath.Datapath);
+
+     RecvContext.Dscp = RecvContext.DscpSupported ? CXPLAT_DSCP_LE : CXPLAT_DSCP_CS0;
 
     auto unspecAddress = GetNewUnspecAddr();
     CxPlatSocket Server(Datapath, &unspecAddress.SockAddr, nullptr, &RecvContext);
@@ -925,7 +1023,7 @@ TEST_P(DataPathTest, UdpDataECT0)
     VERIFY_QUIC_SUCCESS(Client.GetInitStatus());
     ASSERT_NE(nullptr, Client.Socket);
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_ECT_0, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_ECT_0, 0, (uint8_t)RecvContext.Dscp };
     auto ClientSendData = CxPlatSendDataAlloc(Client, &SendConfig);
     ASSERT_NE(nullptr, ClientSendData);
     auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -940,6 +1038,8 @@ TEST_P(DataPathTest, UdpShareClientSocket)
 {
     UdpRecvContext RecvContext;
     CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
     VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
     ASSERT_NE(nullptr, Datapath.Datapath);
     // TODO: Linux XDP (duonic) to support port sharing
@@ -947,6 +1047,8 @@ TEST_P(DataPathTest, UdpShareClientSocket)
         std::cout << "SKIP: Sharing Feature Unsupported" << std::endl;
         return;
     }
+
+    RecvContext.Dscp = RecvContext.DscpSupported ? CXPLAT_DSCP_LE : CXPLAT_DSCP_CS0;
 
     auto serverAddress = GetNewLocalAddr();
     CxPlatSocket Server1(Datapath, &serverAddress.SockAddr, nullptr, &RecvContext);
@@ -973,7 +1075,7 @@ TEST_P(DataPathTest, UdpShareClientSocket)
     CxPlatSocket Client2(Datapath, &clientAddress, &serverAddress.SockAddr, &RecvContext, CXPLAT_SOCKET_FLAG_SHARE);
     VERIFY_QUIC_SUCCESS(Client2.GetInitStatus());
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Client1.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Client1.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
     auto ClientSendData = CxPlatSendDataAlloc(Client1, &SendConfig);
     ASSERT_NE(nullptr, ClientSendData);
     auto ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -985,7 +1087,7 @@ TEST_P(DataPathTest, UdpShareClientSocket)
     ASSERT_TRUE(CxPlatEventWaitWithTimeout(RecvContext.ClientCompletion, 2000));
     CxPlatEventReset(RecvContext.ClientCompletion);
 
-    CXPLAT_SEND_CONFIG SendConfig2 = { &Client2.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig2 = { &Client2.Route, 0, CXPLAT_ECN_NON_ECT, 0, (uint8_t)RecvContext.Dscp };
     ClientSendData = CxPlatSendDataAlloc(Client2, &SendConfig2);
     ASSERT_NE(nullptr, ClientSendData);
     ClientBuffer = CxPlatSendDataAllocBuffer(ClientSendData, ExpectedDataSize);
@@ -1001,6 +1103,7 @@ TEST_P(DataPathTest, UdpShareClientSocket)
 TEST_P(DataPathTest, MultiBindListener) {
     UdpRecvContext RecvContext;
     CxPlatDataPath Datapath(&UdpRecvCallbacks);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
     if (!(Datapath.GetSupportedFeatures() & CXPLAT_DATAPATH_FEATURE_PORT_RESERVATIONS)) {
         std::cout << "SKIP: Port Reservations Feature Unsupported" << std::endl;
         return;
@@ -1020,8 +1123,10 @@ TEST_P(DataPathTest, MultiBindListener) {
 
 TEST_P(DataPathTest, MultiBindListenerSingleProcessor) {
     UdpRecvContext RecvContext;
-    QUIC_EXECUTION_CONFIG Config = { QUIC_EXECUTION_CONFIG_FLAG_NO_IDEAL_PROC, UINT32_MAX, 1, 0 };
+    QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NO_IDEAL_PROC, UINT32_MAX, 1, 0 };
     CxPlatDataPath Datapath(&UdpRecvCallbacks, nullptr, 0, &Config);
+    RecvContext.TtlSupported = Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_TTL);
+    RecvContext.DscpSupported = Datapath.IsDscpSupported();
 
     auto ServerAddress = GetNewLocalAddr();
     CxPlatSocket Server1(Datapath, &ServerAddress.SockAddr, nullptr, &RecvContext);
@@ -1198,7 +1303,7 @@ TEST_P(DataPathTest, TcpDataClient)
     ASSERT_TRUE(CxPlatEventWaitWithTimeout(ListenerContext.AcceptEvent, 500));
     ASSERT_NE(nullptr, ListenerContext.Server);
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Client.Route, 0, CXPLAT_ECN_NON_ECT, 0, CXPLAT_DSCP_CS0 };
     auto SendData = CxPlatSendDataAlloc(Client, &SendConfig);
     ASSERT_NE(nullptr, SendData);
     auto SendBuffer = CxPlatSendDataAllocBuffer(SendData, ExpectedDataSize);
@@ -1243,7 +1348,7 @@ TEST_P(DataPathTest, TcpDataServer)
     CXPLAT_ROUTE Route = Listener.Route;
     Route.RemoteAddress = Client.GetLocalAddress();
 
-    CXPLAT_SEND_CONFIG SendConfig = { &Route, 0, CXPLAT_ECN_NON_ECT, 0 };
+    CXPLAT_SEND_CONFIG SendConfig = { &Route, 0, CXPLAT_ECN_NON_ECT, 0, CXPLAT_DSCP_CS0 };
     auto SendData = CxPlatSendDataAlloc(ListenerContext.Server, &SendConfig);
     ASSERT_NE(nullptr, SendData);
     auto SendBuffer = CxPlatSendDataAllocBuffer(SendData, ExpectedDataSize);
@@ -1252,6 +1357,313 @@ TEST_P(DataPathTest, TcpDataServer)
 
     CxPlatSocketSend(ListenerContext.Server, &Route, SendData);
     ASSERT_TRUE(CxPlatEventWaitWithTimeout(ClientContext.ReceiveEvent, 500));
+}
+
+//
+// CxPlatSetAllocFailDenominator is only available in DEBUG builds, so
+// this test must be DEBUG-only.
+//
+#ifdef DEBUG
+TEST_F(DataPathTest, XdpRuleAddOomCleanup)
+{
+    //
+    // Verify the XDP rule plumbing failure path: when CxPlatDpRawInterfaceAddRules
+    // fails (e.g. due to allocation failure), CxPlatDpRawPlumbRulesOnSocket must
+    // propagate the error and RawSocketCreateUdp must invoke
+    // CxPlatDpRawPlumbRulesOnSocket(FALSE) for best-effort cleanup of any
+    // partially-installed state, then return failure to the caller without
+    // leaking resources or crashing. Only meaningful when running with the
+    // XDP/DuoNic datapath.
+    //
+    if (!UseDuoNic) {
+        GTEST_SKIP();
+    }
+
+    QUIC_GLOBAL_EXECUTION_CONFIG Config = { QUIC_GLOBAL_EXECUTION_CONFIG_FLAG_NONE, 0, 1, {0} };
+    CxPlatDataPath Datapath(&EmptyUdpCallbacks, nullptr, 0, &Config);
+    VERIFY_QUIC_SUCCESS(Datapath.GetInitStatus());
+    ASSERT_TRUE(Datapath.IsSupported(CXPLAT_DATAPATH_FEATURE_RAW, CXPLAT_SOCKET_FLAG_XDP));
+
+    //
+    // Create a client (connected) QTIP socket — providing a RemoteAddress
+    // makes RawSocketCreateUdp take the connected-socket path which reaches
+    // CxPlatDpRawPlumbRulesOnSocket. A non-wildcard local + no remote would
+    // be rejected with QUIC_STATUS_INVALID_STATE before rule plumbing runs.
+    // QTIP also disables the wildcard retry loop and the OS-socket fallback
+    // in CxPlatSocketCreateUdp so the rule-plumbing failure propagates
+    // deterministically.
+    //
+    QuicAddr RemoteAddr = GetNewLocalIPv4();
+
+    //
+    // Fail every 2nd allocation so the socket struct (alloc #1) succeeds and
+    // the XDP rule array allocation inside CxPlatDpRawInterfaceAddRules
+    // (alloc #2) is the one that fails, exercising both the failure-propagation
+    // path and the RawSocketCreateUdp-driven cleanup path.
+    //
+    CxPlatSetAllocFailDenominator(-2);
+    {
+        CxPlatSocket Socket(Datapath, nullptr, &RemoteAddr.SockAddr, nullptr, CXPLAT_SOCKET_FLAG_XDP | CXPLAT_SOCKET_FLAG_QTIP);
+        ASSERT_TRUE(QUIC_FAILED(Socket.GetInitStatus()));
+    }
+    CxPlatSetAllocFailDenominator(0);
+}
+#endif // DEBUG
+
+//
+// XDP Map Mode Tests
+//
+// These tests exercise the XDP map mode initialization path in
+// CxPlatDataPathInitialize (datapath_xplat.c). In map mode the platform
+// (WinSock/epoll) datapath is bypassed and only the raw (XDP) datapath is
+// used. Map mode is triggered when XdpMapConfigCount > 0 and
+// XdpMapConfigs != NULL in the init config.
+//
+
+TEST_F(DataPathTest, XdpMapMode_ZeroConfigUsesNormalPath)
+{
+    //
+    // XdpMapConfigCount == 0 falls through to the normal initialization path.
+    //
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = nullptr;
+    InitConfig.XdpMapConfigCount = 0;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Datapath);
+
+    //
+    // Normal path initializes the platform datapath, which reports features.
+    // Raw-only mode skips platform init and features remain NONE.
+    //
+    CXPLAT_DATAPATH_FEATURES Features =
+        CxPlatDataPathGetSupportedFeatures(Datapath, CXPLAT_SOCKET_FLAG_NONE);
+    ASSERT_NE(CXPLAT_DATAPATH_FEATURE_NONE, Features);
+
+    CxPlatDataPathUninitialize(Datapath);
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
+}
+
+
+TEST_F(DataPathTest, XdpMapMode_InitFailsWithoutRawDatapath)
+{
+    //
+    // Map mode is a hard failure without XDP/DuoNic (raw datapath required).
+    //
+    if (UseDuoNic) {
+        GTEST_SKIP_NO_RETURN_("DuoNic is available; raw datapath will succeed");
+        return;
+    }
+
+    const uint32_t FakeIfIndex = 0xDEAD;
+    const QUIC_XDP_MAP_HANDLE FakeHandle = (QUIC_XDP_MAP_HANDLE)QUIC_INVALID_FILE_HANDLE;
+    CXPLAT_XDP_MAP_CONFIG MapConfig = { FakeIfIndex, FakeHandle };
+
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = &MapConfig;
+    InitConfig.XdpMapConfigCount = 1;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    ASSERT_TRUE(QUIC_FAILED(Status));
+    ASSERT_EQ(nullptr, Datapath);
+
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
+}
+
+TEST_F(DataPathTest, XdpMapMode_InitSucceedsWithRawDatapath)
+{
+    //
+    // 1-map config succeeds when DuoNic/XDP (raw datapath) is
+    // available.
+    //
+    if (!UseDuoNic) {
+        GTEST_SKIP_NO_RETURN_("Requires DuoNic/XDP for raw datapath init");
+        return;
+    }
+
+    const uint32_t FakeIfIndex = 0xDEAD;
+    const QUIC_XDP_MAP_HANDLE FakeHandle = (QUIC_XDP_MAP_HANDLE)QUIC_INVALID_FILE_HANDLE;
+    CXPLAT_XDP_MAP_CONFIG MapConfig = { FakeIfIndex, FakeHandle };
+
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = &MapConfig;
+    InitConfig.XdpMapConfigCount = 1;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Datapath);
+
+    CxPlatDataPathUninitialize(Datapath);
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
+}
+
+TEST_F(DataPathTest, XdpMapMode_SingleUnknownIfIndex)
+{
+    //
+    // Unknown interface index in map config is silently ignored during init.
+    //
+    if (!UseDuoNic) {
+        GTEST_SKIP_NO_RETURN_("Requires DuoNic/XDP for raw datapath init");
+        return;
+    }
+
+    const uint32_t FakeIfIndex = 0xDEAD;
+    const QUIC_XDP_MAP_HANDLE FakeHandle = (QUIC_XDP_MAP_HANDLE)QUIC_INVALID_FILE_HANDLE;
+    CXPLAT_XDP_MAP_CONFIG MapConfig = { FakeIfIndex, FakeHandle };
+
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = &MapConfig;
+    InitConfig.XdpMapConfigCount = 1;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Datapath);
+
+    CxPlatDataPathUninitialize(Datapath);
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
+}
+
+TEST_F(DataPathTest, XdpMapMode_MultipleUnknownIfIndex)
+{
+    //
+    // Multiple unknown interface indices in map configs are silently ignored.
+    //
+    if (!UseDuoNic) {
+        GTEST_SKIP_NO_RETURN_("Requires DuoNic/XDP for raw datapath init");
+        return;
+    }
+
+    CXPLAT_XDP_MAP_CONFIG MapConfigs[3] = {
+        { 0xDEAD, (QUIC_XDP_MAP_HANDLE)(uintptr_t)0x1111 },
+        { 0xBEEF, (QUIC_XDP_MAP_HANDLE)(uintptr_t)0x2222 },
+        { 0xCAFE, (QUIC_XDP_MAP_HANDLE)(uintptr_t)0x3333 },
+    };
+
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = MapConfigs;
+    InitConfig.XdpMapConfigCount = 3;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Datapath);
+
+    CxPlatDataPathUninitialize(Datapath);
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
+}
+
+TEST_F(DataPathTest, XdpMapMode_SocketSkipsRulePlumbing)
+{
+    if (!UseDuoNic) {
+        GTEST_SKIP_NO_RETURN_("Requires DuoNic/XDP for raw datapath init");
+        return;
+    }
+
+    const uint32_t FakeIfIndex = 0xDEAD;
+    const QUIC_XDP_MAP_HANDLE FakeHandle = (QUIC_XDP_MAP_HANDLE)QUIC_INVALID_FILE_HANDLE;
+    CXPLAT_XDP_MAP_CONFIG MapConfig = { FakeIfIndex, FakeHandle };
+
+    CXPLAT_WORKER_POOL* WorkerPool =
+        CxPlatWorkerPoolCreate(nullptr, CXPLAT_WORKER_POOL_REF_TOOL);
+    ASSERT_NE(nullptr, WorkerPool);
+
+    CXPLAT_DATAPATH_INIT_CONFIG InitConfig = {0};
+    InitConfig.XdpMapConfigs = &MapConfig;
+    InitConfig.XdpMapConfigCount = 1;
+
+    CXPLAT_DATAPATH* Datapath = nullptr;
+    QUIC_STATUS Status =
+        CxPlatDataPathInitialize(
+            0,
+            &EmptyUdpCallbacks,
+            nullptr,
+            WorkerPool,
+            &InitConfig,
+            &Datapath);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Datapath);
+
+    ASSERT_EQ(0u, CxPlatDataPathGetXdpRuleCount(Datapath));
+
+    QuicAddr RemoteAddr = GetNewLocalIPv4();
+    QuicAddr LocalAddr = GetNewLocalIPv4();
+
+    CXPLAT_UDP_CONFIG UdpConfig = {0};
+    UdpConfig.RemoteAddress = &RemoteAddr.SockAddr;
+    UdpConfig.LocalAddress = &LocalAddr.SockAddr;
+    UdpConfig.Flags = CXPLAT_SOCKET_FLAG_XDP;
+
+    CXPLAT_SOCKET* Socket = nullptr;
+    Status = CxPlatSocketCreateUdp(Datapath, &UdpConfig, &Socket);
+    VERIFY_QUIC_SUCCESS(Status);
+    ASSERT_NE(nullptr, Socket);
+
+    ASSERT_EQ(0u, CxPlatDataPathGetXdpRuleCount(Datapath));
+
+    CxPlatSocketDelete(Socket);
+
+    CxPlatDataPathUninitialize(Datapath);
+    CxPlatWorkerPoolDelete(WorkerPool, CXPLAT_WORKER_POOL_REF_TOOL);
 }
 
 INSTANTIATE_TEST_SUITE_P(DataPathTest, DataPathTest, ::testing::Values(4, 6), testing::PrintToStringParamName());

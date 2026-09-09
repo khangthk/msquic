@@ -84,6 +84,11 @@ typedef struct QUIC_PACKET_BUILDER {
     uint8_t WrittenConnectionCloseFrame : 1;
 
     //
+    // Initial keys were discarded during this flush.
+    //
+    uint8_t InitialKeysDiscarded : 1;
+
+    //
     // The total number of datagrams that have been created.
     //
     uint8_t TotalCountDatagrams;
@@ -158,7 +163,7 @@ typedef struct QUIC_PACKET_BUILDER {
 
 CXPLAT_STATIC_ASSERT(
     sizeof(QUIC_PACKET_BUILDER) < 1024,
-    L"Packet builder should be small enough to fit on the stack.");
+    "Packet builder should be small enough to fit on the stack.");
 
 //
 // Initializes the packet builder for general use.
@@ -228,7 +233,7 @@ QuicPacketBuilderFinalize(
 // Returns TRUE if congestion control isn't currently blocking sends.
 //
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 BOOLEAN
 QuicPacketBuilderHasAllowance(
     _In_ const QUIC_PACKET_BUILDER* Builder
@@ -243,7 +248,7 @@ QuicPacketBuilderHasAllowance(
 // Returns TRUE if the packet has run out of room for frames.
 //
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 BOOLEAN
 QuicPacketBuilderAddFrame(
     _Inout_ QUIC_PACKET_BUILDER* Builder,
@@ -261,7 +266,7 @@ QuicPacketBuilderAddFrame(
 // Returns TRUE if the packet has run out of room for frames.
 //
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 BOOLEAN
 QuicPacketBuilderAddStreamFrame(
     _Inout_ QUIC_PACKET_BUILDER* Builder,

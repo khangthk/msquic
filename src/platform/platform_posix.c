@@ -282,6 +282,24 @@ CxPlatAlloc(
         return NULL;
     }
 #endif
+    return calloc(1, ByteCount);
+}
+
+void*
+CxPlatAllocUninitialized(
+    _In_ size_t ByteCount,
+    _In_ uint32_t Tag
+    )
+{
+    UNREFERENCED_PARAMETER(Tag);
+#ifdef DEBUG
+    CXPLAT_DBG_ASSERT(ByteCount != 0);
+    uint32_t Rand;
+    if ((CxPlatform.AllocFailDenominator > 0 && (CxPlatRandom(sizeof(Rand), &Rand), Rand % CxPlatform.AllocFailDenominator) == 1) ||
+        (CxPlatform.AllocFailDenominator < 0 && InterlockedIncrement(&CxPlatform.AllocCounter) % CxPlatform.AllocFailDenominator == 0)) {
+        return NULL;
+    }
+#endif
     return malloc(ByteCount);
 }
 
@@ -313,11 +331,22 @@ CxPlatRefInitializeEx(
 }
 
 void
+CxPlatRefInitializeMultiple(
+    _Out_writes_(Count) CXPLAT_REF_COUNT* RefCounts,
+    _In_ uint32_t Count
+    )
+{
+    for (uint32_t i = 0; i < Count; i++) {
+        CxPlatRefInitialize(&RefCounts[i]);
+    }
+}
+
+void
 CxPlatRefIncrement(
     _Inout_ CXPLAT_REF_COUNT* RefCount
     )
 {
-    if (__atomic_add_fetch(RefCount, 1, __ATOMIC_SEQ_CST)) {
+    if (__atomic_add_fetch(RefCount, 1, __ATOMIC_SEQ_CST) > 1) {
         return;
     }
 

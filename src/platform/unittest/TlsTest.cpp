@@ -246,6 +246,10 @@ protected:
         SelfSignedCertParams = nullptr;
         CxPlatFreeSelfSignedCert(ClientCertParams);
         ClientCertParams = nullptr;
+        CxPlatFreeSelfSignedCert(CaSelfSignedCertParams);
+        CaSelfSignedCertParams = nullptr;
+        CxPlatFreeSelfSignedCert(CaClientCertParams);
+        CaClientCertParams = nullptr;
         CxPlatFreeSelfSignedCertCaFile(ServerCaCertificateFile);
         ServerCaCertificateFile = nullptr;
         CxPlatFreeSelfSignedCertCaFile(ClientCaCertificateFile);
@@ -272,6 +276,12 @@ protected:
         CXPLAT_SEC_CONFIG* SecConfig {nullptr};
 
         CXPLAT_TLS_PROCESS_STATE State;
+
+        //
+        // Note, This variable creates a singleton check of the code that
+        // it guards.  See comments where used below
+        //
+        bool BufferKeyChecked;
 
         static const CXPLAT_TLS_CALLBACKS TlsCallbacks;
 
@@ -329,13 +339,15 @@ protected:
                     &Config,
                     &State,
                     &Ptr));
+            BufferKeyChecked = FALSE;
         }
 
         void InitializeClient(
             CXPLAT_SEC_CONFIG* SecConfiguration,
             bool MultipleAlpns = false,
             uint16_t TPLen = 64,
-            QUIC_BUFFER* Ticket = nullptr
+            QUIC_BUFFER* Ticket = nullptr,
+            const char* ServerName = "localhost"
             )
         {
             CXPLAT_TLS_CONFIG Config = {0};
@@ -349,7 +361,7 @@ protected:
                 (uint8_t*)CXPLAT_ALLOC_NONPAGED(CxPlatTlsTPHeaderSize + TPLen, QUIC_POOL_TLS_TRANSPARAMS);
             Config.LocalTPLength = CxPlatTlsTPHeaderSize + TPLen;
             Config.Connection = (QUIC_CONNECTION*)this;
-            Config.ServerName = "localhost";
+            Config.ServerName = ServerName;
             if (Ticket) {
                 ASSERT_NE(nullptr, Ticket->Buffer);
                 //ASSERT_NE((uint32_t)0, Ticket->Length);
@@ -363,6 +375,7 @@ protected:
                     &Config,
                     &State,
                     &Ptr));
+            BufferKeyChecked = FALSE;
         }
 
     private:
@@ -415,7 +428,17 @@ protected:
         {
             EXPECT_TRUE(Buffer != nullptr || *BufferLength == 0);
             if (Buffer != nullptr) {
-                EXPECT_EQ(BufferKey, State.ReadKey);
+                //
+                // BufferKey is only set at the start of the test, But some TLS implementations
+                // may update their keys while processing the data passed into this function
+                // specifically observed on openssl, Sending a buffer with a ServerHello to a client
+                // will yield handshake keys immediately, and following data will cause this to fail
+                // so only check once at the start of the test to ensure we are in the right state
+                //
+                if (BufferKeyChecked == FALSE) {
+                    EXPECT_EQ(BufferKey, State.ReadKey);
+                    BufferKeyChecked = TRUE;
+                }
                 if (DataType != CXPLAT_TLS_TICKET_DATA) {
                     *BufferLength = GetCompleteTlsMessagesLength(Buffer, *BufferLength);
                     if (*BufferLength == 0) return (CXPLAT_TLS_RESULT_FLAGS)0;
@@ -466,6 +489,9 @@ protected:
                 if (ConsumedBuffer > 0) {
                     Buffer += ConsumedBuffer;
                     BufferLength -= ConsumedBuffer;
+                    if (ConsumedBuffer > BufferLength) {
+                        ConsumedBuffer = BufferLength;
+                    }
                 } else {
                     ConsumedBuffer = FragmentSize * ++Count;
                     ConsumedBuffer = CXPLAT_MIN(ConsumedBuffer, BufferLength);
@@ -865,6 +891,75 @@ TEST_F(TlsTest, Handshake)
     ASSERT_FALSE(ServerContext.State.SessionResumed);
 }
 
+TEST_F(TlsTest, ExportKeyingMaterial)
+{
+    CxPlatClientSecConfig ClientConfig;
+    CxPlatServerSecConfig ServerConfig;
+    TlsContext ServerContext, ClientContext;
+    ClientContext.InitializeClient(ClientConfig);
+    ServerContext.InitializeServer(ServerConfig);
+    DoHandshake(ServerContext, ClientContext);
+
+    const char* Label = "EXPORTER-MsQuicTest";
+    const char* OtherLabel = "EXPORTER-Other";
+    const uint8_t Context[] = { 1, 2, 3, 4, 5 };
+    const uint8_t OtherContext[] = { 9, 8, 7, 6, 5 };
+    const uint32_t Length = 32;
+
+    uint8_t ServerKm[Length];
+    uint8_t ClientKm[Length];
+
+    //
+    // Both peers derive identical material for the same label with no context.
+    //
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ServerContext.Ptr, Label, nullptr, 0, ServerKm, Length));
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ClientContext.Ptr, Label, nullptr, 0, ClientKm, Length));
+    ASSERT_EQ(0, memcmp(ServerKm, ClientKm, Length));
+
+    //
+    // Both peers derive identical material for the same label with a context,
+    // and that material differs from the no-context result.
+    //
+    uint8_t ServerCtxKm[Length];
+    uint8_t ClientCtxKm[Length];
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ServerContext.Ptr, Label, Context, sizeof(Context), ServerCtxKm, Length));
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ClientContext.Ptr, Label, Context, sizeof(Context), ClientCtxKm, Length));
+    ASSERT_EQ(0, memcmp(ServerCtxKm, ClientCtxKm, Length));
+    ASSERT_NE(0, memcmp(ClientKm, ClientCtxKm, Length));
+
+    //
+    // A different label yields different material.
+    //
+    uint8_t OtherKm[Length];
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ClientContext.Ptr, OtherLabel, nullptr, 0, OtherKm, Length));
+    ASSERT_NE(0, memcmp(ClientKm, OtherKm, Length));
+
+    //
+    // A different context yields different material.
+    //
+    uint8_t OtherCtxKm[Length];
+    ASSERT_EQ(
+        QUIC_STATUS_SUCCESS,
+        CxPlatTlsExportKeyingMaterial(
+            ClientContext.Ptr, Label, OtherContext, sizeof(OtherContext), OtherCtxKm, Length));
+    ASSERT_NE(0, memcmp(ClientCtxKm, OtherCtxKm, Length));
+}
+
 #ifndef QUIC_DISABLE_PFX_TESTS
 TEST_F(TlsTest, HandshakeCertFromFile)
 {
@@ -902,7 +997,6 @@ TEST_F(TlsTest, HandshakeParamInfoDefault)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_256, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_384, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -920,7 +1014,6 @@ TEST_F(TlsTest, HandshakeParamInfoDefault)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_256, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_384, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -951,7 +1044,6 @@ TEST_F(TlsTest, HandshakeParamInfoAES256GCM)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_256, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_384, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -969,7 +1061,6 @@ TEST_F(TlsTest, HandshakeParamInfoAES256GCM)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_256, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_384, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -1000,7 +1091,6 @@ TEST_F(TlsTest, HandshakeParamInfoAES128GCM)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_128, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(128, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_256, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -1018,7 +1108,6 @@ TEST_F(TlsTest, HandshakeParamInfoAES128GCM)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_AES_128, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(128, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     //EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_256, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -1052,7 +1141,6 @@ TEST_F(TlsTest, HandshakeParamInfoChaCha20)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_CHACHA20, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_256, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -1070,7 +1158,6 @@ TEST_F(TlsTest, HandshakeParamInfoChaCha20)
     EXPECT_EQ(QUIC_TLS_PROTOCOL_1_3, HandshakeInfo.TlsProtocolVersion);
     EXPECT_EQ(QUIC_CIPHER_ALGORITHM_CHACHA20, HandshakeInfo.CipherAlgorithm);
     EXPECT_EQ(256, HandshakeInfo.CipherStrength);
-    EXPECT_EQ(0, HandshakeInfo.KeyExchangeAlgorithm);
     EXPECT_EQ(0, HandshakeInfo.KeyExchangeStrength);
     EXPECT_EQ(QUIC_HASH_ALGORITHM_SHA_256, HandshakeInfo.Hash);
     EXPECT_EQ(0, HandshakeInfo.HashStrength);
@@ -1398,6 +1485,27 @@ TEST_F(TlsTest, DeferredCertificateValidationAllow)
 }
 
 #ifdef QUIC_ENABLE_CA_CERTIFICATE_FILE_TESTS
+TEST_F(TlsTest, ServerCertificateReferenceIdentityMismatch)
+{
+    CxPlatClientSecConfigCa ClientConfig(
+        QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE);
+    CxPlatServerSecConfigCa ServerConfig(
+        QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE);
+
+    for (const char* ServerName : {"not-localhost", "127.0.0.1"}) {
+        TlsContext ServerContext, ClientContext;
+        ClientContext.InitializeClient(ClientConfig, false, 64, nullptr, ServerName);
+        ServerContext.InitializeServer(ServerConfig);
+        DoHandshake(
+            ServerContext,
+            ClientContext,
+            DefaultFragmentSize,
+            false,
+            false,
+            true);
+    }
+}
+
 TEST_F(TlsTest, DeferredCertificateValidationAllowCa)
 {
     CxPlatClientSecConfigCa ClientConfig(
@@ -2222,6 +2330,7 @@ TEST_F(TlsTest, PlatformSpecificFlagsSchannel)
         QUIC_CREDENTIAL_FLAG_REVOCATION_CHECK_END_CERT, QUIC_CREDENTIAL_FLAG_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
         QUIC_CREDENTIAL_FLAG_IGNORE_NO_REVOCATION_CHECK, QUIC_CREDENTIAL_FLAG_IGNORE_REVOCATION_OFFLINE,
         QUIC_CREDENTIAL_FLAG_CACHE_ONLY_URL_RETRIEVAL, QUIC_CREDENTIAL_FLAG_REVOCATION_CHECK_CACHE_ONLY,
+        QUIC_CREDENTIAL_FLAG_DISABLE_AIA,
 #ifndef __APPLE__
         QUIC_CREDENTIAL_FLAG_REVOCATION_CHECK_CHAIN,
 #endif

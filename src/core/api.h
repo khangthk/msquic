@@ -5,6 +5,39 @@
 
 --*/
 
+//
+// Private flag of the QUIC_CONNECTION_SHUTDOWN_FLAGS enum used for indicating
+// the type of error code being passed in. Not exposed to apps because they
+// should not be using different types of errors directly.
+//
+#define QUIC_CONNECTION_SHUTDOWN_FLAG_STATUS ((QUIC_CONNECTION_SHUTDOWN_FLAGS)0x8000)
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicExecutionCreate(
+    _In_ QUIC_GLOBAL_EXECUTION_CONFIG_FLAGS Flags, // Used for datapath type
+    _In_ uint32_t PollingIdleTimeoutUs,
+    _In_ uint32_t Count,
+    _In_reads_(Count) QUIC_EXECUTION_CONFIG* Configs,
+    _Out_writes_(Count) QUIC_EXECUTION** Executions
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QUIC_API
+MsQuicExecutionDelete(
+    _In_ uint32_t Count,
+    _In_reads_(Count) QUIC_EXECUTION** Executions
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+uint32_t
+QUIC_API
+MsQuicExecutionPoll(
+    _In_ QUIC_EXECUTION* Execution
+    );
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 QUIC_STATUS
 QUIC_API
@@ -20,6 +53,16 @@ QUIC_API
 MsQuicRegistrationClose(
     _In_ _Pre_defensive_ __drv_freesMem(Mem)
         HQUIC Handle
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+void
+QUIC_API
+MsQuicRegistrationClose2(
+    _In_ _Pre_defensive_ __drv_freesMem(Mem)
+        HQUIC Handle,
+    _In_ _Pre_defensive_ QUIC_REGISTRATION_CLOSE_CALLBACK_HANDLER Handler,
+    _In_opt_ void* Context
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -111,6 +154,18 @@ MsQuicConnectionOpen(
         HQUIC *Connection
     );
 
+_IRQL_requires_max_(DISPATCH_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicConnectionOpenInPartition(
+    _In_ _Pre_defensive_ HQUIC Registration,
+    _In_ uint16_t PartitionIndex,
+    _In_ _Pre_defensive_ QUIC_CONNECTION_CALLBACK_HANDLER Handler,
+    _In_opt_ void* Context,
+    _Outptr_ _At_(*Connection, __drv_allocatesMem(Mem)) _Pre_defensive_
+        HQUIC *Connection
+    );
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 void
 QUIC_API
@@ -157,6 +212,16 @@ MsQuicConnectionSendResumptionTicket(
     _In_ uint16_t DataLength,
     _In_reads_bytes_opt_(DataLength)
         const uint8_t* ResumptionData
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicConnectionExportKeyingMaterial(
+    _In_ _Pre_defensive_ HQUIC Handle,
+    _In_ _Pre_defensive_ const QUIC_KEYING_MATERIAL_CONFIG* Config,
+    _Out_writes_bytes_(Config->OutputLength)
+        uint8_t* Output
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -214,6 +279,15 @@ QUIC_API
 MsQuicStreamReceiveComplete(
     _In_ _Pre_defensive_ HQUIC Handle,
     _In_ uint64_t BufferLength
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicStreamProvideReceiveBuffers(
+    _In_ _Pre_defensive_ HQUIC Handle,
+    _In_ uint32_t BufferCount,
+    _In_reads_(BufferCount) const QUIC_BUFFER *Buffers
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -277,4 +351,13 @@ MsQuicConnectionCertificateValidationComplete(
     _In_ _Pre_defensive_ HQUIC Handle,
     _In_ BOOLEAN Result,
     _In_ QUIC_TLS_ALERT_CODES TlsAlert
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+QUIC_STATUS
+QUIC_API
+MsQuicConnectionPoolCreate(
+    _In_ QUIC_CONNECTION_POOL_CONFIG* Config,
+    _Out_writes_(Config->NumberOfConnections)
+        HQUIC* ConnectionPool
     );

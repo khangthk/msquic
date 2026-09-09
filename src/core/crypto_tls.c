@@ -63,7 +63,7 @@ typedef enum eSniNameType {
 #define QUIC_TP_ID_MAX_DATAGRAM_FRAME_SIZE                  32              // varint
 #define QUIC_TP_ID_DISABLE_1RTT_ENCRYPTION                  0xBAAD          // N/A
 #define QUIC_TP_ID_VERSION_NEGOTIATION_EXT                  0x11            // Blob
-#define QUIC_TP_ID_MIN_ACK_DELAY                            0xFF03DE1AULL   // varint
+#define QUIC_TP_ID_MIN_ACK_DELAY                            0xFF04DE1BULL   // varint
 #define QUIC_TP_ID_CIBIR_ENCODING                           0x1000          // {varint, varint}
 #define QUIC_TP_ID_GREASE_QUIC_BIT                          0x2AB2          // N/A
 #define QUIC_TP_ID_RELIABLE_RESET_ENABLED                   0x17f7586d2cb570   // varint
@@ -1849,7 +1849,7 @@ QuicCryptoTlsDecodeTransportParameters( // NOLINT(readability-function-size, goo
                         "Allocation of '%s' failed. (%llu bytes)",
                         "Version Negotiation Info",
                         Length);
-                    break;
+                    goto Exit;
                 }
                 CxPlatCopyMemory((uint8_t*)TransportParams->VersionInfo, TPBuf + Offset, Length);
             } else {
@@ -1988,7 +1988,10 @@ QuicCryptoTlsDecodeTransportParameters( // NOLINT(readability-function-size, goo
     Result = TRUE;
 
 Exit:
-
+    if (!Result) {
+        QuicCryptoTlsCleanupTransportParameters(TransportParams);
+        CxPlatZeroMemory(TransportParams, sizeof(QUIC_TRANSPORT_PARAMETERS));
+    }
     return Result;
 }
 

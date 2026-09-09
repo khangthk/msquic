@@ -209,8 +209,14 @@ QuicPathInitialize(
     _In_ QUIC_PATH* Path
     );
 
+//
+// Remove a path from the connection.
+// If the path is the last path on the connection,
+// keep the path and silently close the connection.
+// Returns TRUE if a path was removed.
+//
 _IRQL_requires_max_(PASSIVE_LEVEL)
-void
+BOOLEAN
 QuicPathRemove(
     _In_ QUIC_CONNECTION* Connection,
     _In_ uint8_t Index
@@ -225,7 +231,7 @@ QuicPathSetAllowance(
     );
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
-inline
+QUIC_INLINE
 void
 QuicPathIncrementAllowance(
     _In_ QUIC_CONNECTION* Connection,
@@ -237,7 +243,7 @@ QuicPathIncrementAllowance(
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
-inline
+QUIC_INLINE
 void
 QuicPathDecrementAllowance(
     _In_ QUIC_CONNECTION* Connection,
@@ -254,7 +260,7 @@ QuicPathDecrementAllowance(
 //
 // Calculates the maximum size datagram payload from the path's MTU.
 //
-inline
+QUIC_INLINE
 uint16_t
 QuicPathGetDatagramPayloadSize(
     _In_ const QUIC_PATH* Path

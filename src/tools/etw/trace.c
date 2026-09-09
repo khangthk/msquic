@@ -311,6 +311,15 @@ QuicTraceGlobalEvent(
             case QUIC_PERF_COUNTER_CONN_LOAD_REJECT:
                 printf("    Total connections rejected due to worker load:      ");
                 break;
+            case QUIC_PERF_COUNTER_LISTEN_QUEUE_DEPTH:
+                printf("    Current listeners queued for processing:            ");
+                break;
+            case QUIC_PERF_COUNTER_ENCRYPT_DURATION_US:
+                printf("    Total encryption duration (us):                     ");
+                break;
+            case QUIC_PERF_COUNTER_DECRYPT_DURATION_US:
+                printf("    Total decryption duration (us):                     ");
+                break;
             default:
                 printf("    Unknown:                                            ");
                 break;

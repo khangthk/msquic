@@ -18,12 +18,13 @@ endif()
 message(STATUS "CMAKE Version: ${CMAKE_VERSION}")
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+set(CMAKE_VS_GLOBALS "UseInternalMSUniCrtPackage=true")
 
 message(STATUS "Source Dir: ${CMAKE_CURRENT_SOURCE_DIR}")
 message(STATUS "Host System name: ${CMAKE_HOST_SYSTEM_NAME}")
 if ("${CMAKE_HOST_SYSTEM_NAME}" STREQUAL "Windows")
     if (NOT DEFINED CMAKE_SYSTEM_VERSION)
-        set(CMAKE_SYSTEM_VERSION 10.0.22621.0 CACHE STRING INTERNAL FORCE)
+        set(CMAKE_SYSTEM_VERSION 10.0.26100.0 CACHE STRING INTERNAL FORCE)
     endif()
 endif()
 
@@ -39,6 +40,8 @@ if (POLICY CMP0111)
 endif()
 
 project(msquic)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Set a default build type if none was specified
 set(default_build_type "Release")
@@ -56,7 +59,7 @@ message(STATUS "Platform version: ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 set(QUIC_MAJOR_VERSION 2)
-set(QUIC_FULL_VERSION 2.5.0)
+set(QUIC_FULL_VERSION 2.7.0)
 
 if (WIN32)
     set(CX_PLATFORM "windows")
@@ -67,16 +70,17 @@ elseif (UNIX)
 endif()
 message(STATUS "QUIC Platform: ${CX_PLATFORM}")
 
-set(FILENAME_DEP_REPLACE "get_filename_component(SELF_DIR \"$\{CMAKE_CURRENT_LIST_FILE\}\" PATH)")
-set(SELF_DIR "$\{SELF_DIR\}")
-
 enable_testing()
+
+if (NOT "${QUIC_TLS}" STREQUAL "")
+    message(FATAL_ERROR "QUIC_TLS is deprecated, Use QUIC_TLS_LIB instead")
+endif()
 
 # Set the default TLS method for each platform.
 if (WIN32)
-    set(QUIC_TLS "schannel" CACHE STRING "TLS Library to use")
+    set(QUIC_TLS_LIB "schannel" CACHE STRING "TLS Library to use")
 else()
-    set(QUIC_TLS "openssl" CACHE STRING "TLS Library to use")
+    set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use")
 endif()
 
 option(QUIC_BUILD_TOOLS "Builds the tools code" OFF)
@@ -84,14 +88,21 @@ option(QUIC_BUILD_TEST "Builds the test code" OFF)
 option(QUIC_BUILD_PERF "Builds the perf code" OFF)
 option(QUIC_BUILD_SHARED "Builds msquic as a dynamic library" ON)
 option(QUIC_ENABLE_LOGGING "Enables logging" OFF)
-option(QUIC_ENABLE_SANITIZERS "Enables sanitizers" OFF)
+option(QUIC_ENABLE_ALL_SANITIZERS "Enables all sanitizers" OFF)
+option(QUIC_ENABLE_ASAN "Enables only Address Sanitizer" OFF)
+option(QUIC_ENABLE_LSAN "Enables only Leak Sanitizer" OFF)
+option(QUIC_ENABLE_UBSAN "Enables only Undefined Behavior Sanitizer" OFF)
+option(QUIC_ENABLE_TSAN "Enables only Thread Sanitizer" OFF)
+option(QUIC_ENABLE_EXTRA_SANITIZERS "Enables only extra sanitizers" OFF)
+option(QUIC_SKIP_SANITIZE_SUBMODULES "Skip passing sanitizer settings to submodule build" OFF)
 option(QUIC_ENABLE_POOL_ALLOC "Enables pool allocations" ON)
 option(QUIC_STATIC_LINK_CRT "Statically links the C runtime" ON)
 option(QUIC_STATIC_LINK_PARTIAL_CRT "Statically links the compiler-specific portion of the C runtime" ON)
 option(QUIC_UWP_BUILD "Build for UWP" OFF)
 option(QUIC_GAMECORE_BUILD "Build for GameCore" OFF)
+option(QUIC_EXTERNAL_TOOLCHAIN "Enable if system libs and include paths are configured by CMake toolchain" OFF)
 option(QUIC_PGO "Enables profile guided optimizations" OFF)
-option(QUIC_LINUX_XDP_ENABLED "Enables XDP support" OFF)
+option(QUIC_LINUX_IOURING_ENABLED "Enables io_uring support" OFF)
 option(QUIC_SOURCE_LINK "Enables source linking on MSVC" ON)
 option(QUIC_EMBED_GIT_HASH "Embed git commit hash in the binary" ON)
 option(QUIC_PDBALTPATH "Enable PDBALTPATH setting on MSVC" ON)
@@ -100,7 +111,32 @@ option(QUIC_OPTIMIZE_LOCAL "Optimize code for local machine architecture" OFF)
 option(QUIC_CI "CI Specific build" OFF)
 option(QUIC_SKIP_CI_CHECKS "Disable CI specific build checks" OFF)
 option(QUIC_TELEMETRY_ASSERTS "Enable telemetry asserts in release builds" OFF)
-option(QUIC_USE_SYSTEM_LIBCRYPTO "Use system libcrypto if openssl TLS" OFF)
+option(QUIC_USE_SYSTEM_LIBCRYPTO "Use system libcrypto if quictls TLS" OFF)
+option(QUIC_USE_EXTERNAL_OPENSSL "Use external OpenSSL instead of building from submodules" OFF)
+set(QUIC_OPENSSL_INCLUDE_DIR "" CACHE PATH "Path to OpenSSL include directory")
+set(QUIC_OPENSSL_LIB_DIR "" CACHE PATH "Path to OpenSSL library directory")
+set(QUIC_OPENSSL_SYMBOL_PREFIX "" CACHE STRING "If non-empty, namespace-prefix every symbol in the bundled OpenSSL static archives (Linux only) so the resulting binary can coexist in the same process with another OpenSSL copy. See docs/OpenSSLSymbolPrefix.md")
+set(QUIC_OPENSSL_ROOT_DIR "" CACHE PATH "Path to OpenSSL root directory")
+
+# Outer-most validation for QUIC_OPENSSL_SYMBOL_PREFIX so a value combined with
+# a non-quictls/openssl TLS_LIB (e.g. schannel) errors loudly instead of being
+# silently ignored, and so the prefix value is rejected before it is
+# interpolated into objcopy --redefine-syms map lines or build-tree paths.
+if(NOT "${QUIC_OPENSSL_SYMBOL_PREFIX}" STREQUAL "")
+    if(NOT (QUIC_TLS_LIB STREQUAL "quictls" OR QUIC_TLS_LIB STREQUAL "openssl"))
+        message(FATAL_ERROR
+            "QUIC_OPENSSL_SYMBOL_PREFIX requires QUIC_TLS_LIB=quictls or openssl "
+            "(got QUIC_TLS_LIB='${QUIC_TLS_LIB}'). The prefix only applies to the "
+            "bundled OpenSSL build path.")
+    endif()
+    if(NOT QUIC_OPENSSL_SYMBOL_PREFIX MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+        message(FATAL_ERROR
+            "QUIC_OPENSSL_SYMBOL_PREFIX must match ^[A-Za-z_][A-Za-z0-9_]*$ "
+            "(got '${QUIC_OPENSSL_SYMBOL_PREFIX}'). The prefix is interpolated into "
+            "objcopy --redefine-syms map lines and into the build-tree path; "
+            "whitespace, '#', '/', leading digits, and shell metacharacters are unsafe.")
+    endif()
+endif()
 option(QUIC_HIGH_RES_TIMERS "Configure the system to use high resolution timers" OFF)
 option(QUIC_OFFICIAL_RELEASE "Configured the build for an official release" OFF)
 set(QUIC_FOLDER_PREFIX "" CACHE STRING "Optional prefix for source group folders when using an IDE generator")
@@ -109,6 +145,26 @@ set(QUIC_LOGGING_TYPE "" CACHE STRING "Explicitly choose logging backend (\"etw\
 string(TOLOWER "${QUIC_LOGGING_TYPE}" QUIC_LOGGING_TYPE)
 if(NOT "${QUIC_LOGGING_TYPE}" MATCHES "^(etw|lttng|stdout|)$")
     message(FATAL_ERROR "QUIC_LOGGING_TYPE must be \"etw\", \"lttng\" or \"stdout\", not \"${QUIC_LOGGING_TYPE}\"")
+endif()
+
+if (QUIC_ENABLE_ALL_SANITIZERS)
+    set(QUIC_SANITIZER_ACTIVE ON)
+    set(QUIC_ENABLE_ASAN ON)
+    set(QUIC_ENABLE_LSAN ON)
+    set(QUIC_ENABLE_UBSAN ON)
+    set(QUIC_ENABLE_EXTRA_SANITIZERS ON)
+elseif (QUIC_ENABLE_ASAN)
+    set(QUIC_SANITIZER_ACTIVE ON)
+elseif (QUIC_ENABLE_LSAN)
+    set(QUIC_SANITIZER_ACTIVE ON)
+elseif (QUIC_ENABLE_UBSAN)
+    set(QUIC_SANITIZER_ACTIVE ON)
+elseif (QUIC_ENABLE_TSAN)
+    set(QUIC_SANITIZER_ACTIVE ON)
+elseif (QUIC_ENABLE_EXTRA_SANITIZERS)
+    set(QUIC_SANITIZER_ACTIVE ON)
+else()
+    set(QUIC_SANITIZER_ACTIVE OFF)
 endif()
 
 if (QUIC_GAMECORE_BUILD)
@@ -200,13 +256,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${QUIC_OUTPUT_DIR})
 
 set(QUIC_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/inc)
 
+include(GNUInstallDirs)
+
 if (WIN32)
+    if (QUIC_USE_SYSTEM_LIBCRYPTO)
+        message(FATAL_ERROR "-UseSystemOpenSSLCrypto is currently not supported on Windows platforms.")
+    endif()
+
     set(QUIC_WARNING_FLAGS /WX /W4 /sdl /wd4206 CACHE INTERNAL "")
-    set(QUIC_COMMON_FLAGS "")
+    set(QUIC_COMMON_FLAGS /utf-8)
 
     include(CheckCCompilerFlag)
 
-    if(NOT QUIC_ENABLE_SANITIZERS)
+    if(NOT QUIC_SANITIZER_ACTIVE)
         check_c_compiler_flag(/Qspectre HAS_SPECTRE)
     endif()
     if(HAS_SPECTRE)
@@ -223,9 +285,19 @@ if (WIN32)
         if(NOT HAS_GUARDCF)
             message(FATAL_ERROR "/guard:cf must exist for CI builds")
         endif()
-        if(NOT HAS_SPECTRE AND NOT QUIC_ENABLE_SANITIZERS AND NOT QUIC_UWP_BUILD)
+        if(NOT HAS_SPECTRE AND NOT QUIC_SANITIZER_ACTIVE AND NOT QUIC_UWP_BUILD)
             message(FATAL_ERROR "/Qspectre must exist for CI builds")
         endif()
+    endif()
+
+    if (QUIC_SANITIZER_ACTIVE)
+        message(STATUS "Allowing non-system32 DLLs to be loaded for ASAN")
+    elseif (QUIC_GAMECORE_BUILD)
+        message(STATUS "Allowing non-system32 DLLs to be loaded for GameCore")
+    else()
+        # Configure linker to only load from the system directory.
+        message(STATUS "Configuring linker to only load from the system directory")
+        set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEPENDENTLOADFLAG:0x800")
     endif()
 
     if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
@@ -312,7 +384,8 @@ else()
         list(APPEND QUIC_WARNING_FLAGS -Wno-strict-aliasing)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         list(APPEND QUIC_WARNING_FLAGS -Wno-missing-braces -Wno-microsoft-anon-tag)
-        if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 18)
+        if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 18 OR
+           (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16 AND CMAKE_CXX_COMPILER_ID MATCHES "AppleClang"))
             list(APPEND QUIC_WARNING_FLAGS -Wno-invalid-unevaluated-string)
         endif()
     endif()
@@ -333,7 +406,7 @@ if(QUIC_HIGH_RES_TIMERS)
     list(APPEND QUIC_COMMON_DEFINES QUIC_HIGH_RES_TIMERS=1)
 endif()
 
-if (QUIC_ENABLE_SANITIZERS OR NOT QUIC_ENABLE_POOL_ALLOC)
+if (QUIC_SANITIZER_ACTIVE OR NOT QUIC_ENABLE_POOL_ALLOC)
     list(APPEND QUIC_COMMON_DEFINES DISABLE_CXPLAT_POOL=1)
 endif()
 
@@ -342,7 +415,7 @@ if(QUIC_OFFICIAL_RELEASE)
     message(STATUS "Configured for official release build")
 endif()
 
-if(QUIC_TLS STREQUAL "schannel")
+if(QUIC_TLS_LIB STREQUAL "schannel")
     message(STATUS "Enabling Schannel configuration tests")
     list(APPEND QUIC_COMMON_DEFINES QUIC_TEST_SCHANNEL_FLAGS=1)
 
@@ -356,8 +429,8 @@ if(QUIC_TLS STREQUAL "schannel")
     list(APPEND QUIC_COMMON_DEFINES QUIC_ENABLE_ANON_CLIENT_AUTH_TESTS)
 endif()
 
-if(QUIC_TLS STREQUAL "openssl" OR  QUIC_TLS STREQUAL "openssl3")
-    message(STATUS "Enabling OpenSsl configuration tests")
+if(QUIC_TLS_LIB STREQUAL "quictls" OR QUIC_TLS_LIB STREQUAL "openssl")
+    message(STATUS "Enabling quictls/openssl configuration tests")
     list(APPEND QUIC_COMMON_DEFINES QUIC_TEST_OPENSSL_FLAGS=1)
     if (NOT WIN32)
        message(STATUS "Enabling CA file tests")
@@ -376,29 +449,24 @@ if(QUIC_ENABLE_LOGGING)
         endif()
 
     elseif (QUIC_LOGGING_TYPE STREQUAL "lttng")
-        if (QUIC_ENABLE_SANITIZERS)
-            message(WARNING "LTTng logging is incompatible with sanitizers. Skipping logging")
+        # FindLTTngUST does not exist before CMake 3.6, so disable logging for older cmake versions
+        if (${CMAKE_VERSION} VERSION_LESS "3.6.0")
+            message(WARNING "Logging unsupported on this version of CMake. Please upgrade to 3.6 or later.")
             set(QUIC_ENABLE_LOGGING OFF)
         else()
-            # FindLTTngUST does not exist before CMake 3.6, so disable logging for older cmake versions
-            if (${CMAKE_VERSION} VERSION_LESS "3.6.0")
-                message(WARNING "Logging unsupported on this version of CMake. Please upgrade to 3.6 or later.")
+            check_include_file(lttng/ust-config.h HAS_LTTNG)
+            if (NOT HAS_LTTNG)
+                message(WARNING "LTTng logging not found. Disabling logging")
                 set(QUIC_ENABLE_LOGGING OFF)
             else()
-                check_include_file(lttng/ust-config.h HAS_LTTNG)
-                if (NOT HAS_LTTNG)
-                    message(WARNING "LTTng logging not found. Disabling logging")
+                check_symbol_exists(LTTNG_UST_HAVE_SDT_INTEGRATION lttng/ust-config.h HAS_LTTNG_SDT)
+                if(HAS_LTTNG_SDT)
+                    message(WARNING "LTTng with SDT integration does not work. Disabling logging")
                     set(QUIC_ENABLE_LOGGING OFF)
                 else()
-                    check_symbol_exists(LTTNG_UST_HAVE_SDT_INTEGRATION lttng/ust-config.h HAS_LTTNG_SDT)
-                    if(HAS_LTTNG_SDT)
-                        message(WARNING "LTTng with SDT integration does not work. Disabling logging")
-                        set(QUIC_ENABLE_LOGGING OFF)
-                    else()
-                        message(STATUS "Configuring for LTTng logging")
-                        list(APPEND QUIC_COMMON_DEFINES QUIC_CLOG)
-                        include(FindLTTngUST)
-                    endif()
+                    message(STATUS "Configuring for LTTng logging")
+                    list(APPEND QUIC_COMMON_DEFINES QUIC_CLOG)
+                    include(FindLTTngUST)
                 endif()
             endif()
         endif()
@@ -439,6 +507,15 @@ if (NOT MSVC AND NOT APPLE AND NOT ANDROID)
     endif()
 endif()
 
+if (QUIC_LINUX_IOURING_ENABLED)
+    find_library(LIBURING NAMES liburing-ffi.so)
+    if (LIBURING)
+        message(STATUS "Found liburing: ${LIBURING}")
+    else()
+        message(STATUS "liburing not found. If build fails, install liburing")
+    endif()
+endif()
+
 if (CMAKE_GENERATOR_PLATFORM STREQUAL "")
 string(TOLOWER ${CMAKE_SYSTEM_PROCESSOR} SYSTEM_PROCESSOR)
 else()
@@ -449,18 +526,30 @@ if(WIN32)
     # Generate the MsQuicEtw header file.
     file(MAKE_DIRECTORY ${QUIC_BUILD_DIR}/inc)
 
+    if(NOT DEFINED CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH OR CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH)
+        find_program(MC_EXE NAMES mc.exe)
+        if(MC_EXE MATCHES "NOTFOUND")
+            # If not found, then VS project generator will set %PATH% env var to WinSDK bin directory
+            set(MC_EXE "mc.exe" CACHE STRING "mc.exe from %PATH%" FORCE)
+        endif()
+    else()
+        find_program(MC_EXE NAMES mc.exe REQUIRED)
+    endif()
+
     add_custom_command(
         OUTPUT ${QUIC_BUILD_DIR}/inc/MsQuicEtw.h
         OUTPUT ${QUIC_BUILD_DIR}/inc/MsQuicEtw.rc
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest/MsQuicEtw.man
-        COMMAND mc.exe -um -h ${QUIC_BUILD_DIR}/inc -r ${QUIC_BUILD_DIR}/inc ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest/MsQuicEtw.man)
+        COMMAND "${MC_EXE}" -um -h ${QUIC_BUILD_DIR}/inc -r ${QUIC_BUILD_DIR}/inc ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest/MsQuicEtw.man)
     add_custom_target(MsQuicEtw_HeaderBuild
         DEPENDS ${QUIC_BUILD_DIR}/inc/MsQuicEtw.h)
 
     set_property(TARGET MsQuicEtw_HeaderBuild PROPERTY FOLDER "${QUIC_FOLDER_PREFIX}helpers")
 
     add_library(MsQuicEtw_Header INTERFACE)
-    target_include_directories(MsQuicEtw_Header INTERFACE ${QUIC_BUILD_DIR}/inc)
+    target_include_directories(MsQuicEtw_Header INTERFACE
+        $<BUILD_INTERFACE:${QUIC_BUILD_DIR}/inc>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     add_dependencies(MsQuicEtw_Header MsQuicEtw_HeaderBuild)
 
     add_library(MsQuicEtw_Resource OBJECT ${QUIC_BUILD_DIR}/inc/MsQuicEtw.rc)
@@ -478,7 +567,11 @@ if(WIN32)
     endif()
 
     if (QUIC_GAMECORE_BUILD)
-        list(APPEND QUIC_COMMON_DEFINES WINAPI_FAMILY=WINAPI_FAMILY_GAMES QUIC_GAMECORE_BUILD QUIC_RESTRICTED_BUILD)
+        list(APPEND QUIC_COMMON_DEFINES QUIC_GAMECORE_BUILD QUIC_RESTRICTED_BUILD)
+    endif()
+
+    if (QUIC_GAMECORE_BUILD AND NOT QUIC_EXTERNAL_TOOLCHAIN)
+        list(APPEND QUIC_COMMON_DEFINES WINAPI_FAMILY=WINAPI_FAMILY_GAMES)
         set(CMAKE_CXX_STANDARD_LIBRARIES "")
         set(CMAKE_CXX_STANDARD_LIBRARIES_INIT "")
         set(CMAKE_C_STANDARD_LIBRARIES "")
@@ -539,12 +632,12 @@ if(WIN32)
 
     endif()
 
-    if(QUIC_ENABLE_SANITIZERS)
+    if(QUIC_SANITIZER_ACTIVE)
         # This fails when linking statically, so for today require dynamic linkage
         if (QUIC_STATIC_LINK_CRT)
             message(FATAL_ERROR "Static linkage unsupported with Address Sanitizer in Windows")
         endif()
-        message(STATUS "Configuring sanitizers")
+        message(STATUS "Configuring sanitizers: ASAN:${QUIC_ENABLE_ASAN} LSAN:${QUIC_ENABLE_LSAN} UBSAN:${QUIC_ENABLE_UBSAN} EXTRA:${QUIC_ENABLE_EXTRA_SANITIZERS}")
         list(APPEND QUIC_COMMON_FLAGS /fsanitize=address)
         list(APPEND QUIC_COMMON_DEFINES _DISABLE_VECTOR_ANNOTATION) # For std:vector usage in tests
     endif()
@@ -560,7 +653,7 @@ if(WIN32)
 
     # Find the right PGO file.
     if(NOT EXISTS "${QUIC_PGO_FILE}")
-        set(QUIC_PGO_NAME "msquic.${QUIC_TLS}.pgd")
+        set(QUIC_PGO_NAME "msquic.${QUIC_TLS_LIB}.pgd")
         set(QUIC_PGO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/bin/winuser/pgo_${SYSTEM_PROCESSOR}/${QUIC_PGO_NAME}")
     endif()
     if(NOT EXISTS "${QUIC_PGO_FILE}")
@@ -614,7 +707,7 @@ else() #!WIN32
         set(MARCH -march=native)
     endif()
 
-    set(CMAKE_C_FLAGS_DEBUG "-Og -fno-omit-frame-pointer")
+    set(CMAKE_C_FLAGS_DEBUG "-O0 -fno-omit-frame-pointer")
     set(CMAKE_C_FLAGS_MINSIZEREL "-Os -DNDEBUG")
     set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -fno-omit-frame-pointer ${MARCH} -DNDEBUG")
     set(CMAKE_C_FLAGS_RELEASE "-O3 ${MARCH} -DNDEBUG")
@@ -642,16 +735,46 @@ else() #!WIN32
         list(APPEND QUIC_COMMON_DEFINES QUIC_SHARED_EPHEMERAL_WORKAROUND)
     endif()
 
-    if(QUIC_ENABLE_SANITIZERS)
-        message(STATUS "Configuring sanitizers")
-        list(APPEND QUIC_COMMON_FLAGS -fsanitize=address,leak,undefined,alignment -fsanitize-address-use-after-scope -Og -fno-omit-frame-pointer -fno-optimize-sibling-calls -fno-var-tracking-assignments)
+    if (QUIC_SANITIZER_ACTIVE)
+        message(STATUS "Configuring sanitizers: ASAN:${QUIC_ENABLE_ASAN} LSAN:${QUIC_ENABLE_LSAN} UBSAN:${QUIC_ENABLE_UBSAN} TSAN:${QUIC_ENABLE_TSAN} EXTRA:${QUIC_ENABLE_EXTRA_SANITIZERS}")
+        # Append common flags for all sanitizer options
+        list(APPEND QUIC_COMMON_FLAGS -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls)
+
+        # Clang/LLVM doesn't support this flag, but GCC does.
+        check_c_compiler_flag(-fno-var-tracking-assignments HAS_NO_VAR_TRACKING)
+        if (HAS_NO_VAR_TRACKING)
+            list(APPEND QUIC_COMMON_FLAGS -fno-var-tracking-assignments)
+        endif()
+
         if (CX_PLATFORM STREQUAL "darwin")
             list(APPEND QUIC_COMMON_FLAGS -gdwarf)
         else()
             list(APPEND QUIC_COMMON_FLAGS -ggdb3)
         endif()
-        if (CMAKE_C_COMPILER_ID MATCHES "Clang")
-            list(APPEND QUIC_COMMON_FLAGS -fsanitize=unsigned-integer-overflow -fsanitize=local-bounds -fsanitize=integer -fsanitize=nullability)
+
+        if (QUIC_ENABLE_ASAN)
+            list(APPEND QUIC_COMMON_FLAGS -fsanitize=address)
+        endif()
+
+        if (QUIC_ENABLE_LSAN)
+            list(APPEND QUIC_COMMON_FLAGS -fsanitize=leak)
+        endif()
+
+        if (QUIC_ENABLE_UBSAN)
+            list(APPEND QUIC_COMMON_FLAGS -fsanitize=undefined)
+        endif()
+
+        if (QUIC_ENABLE_TSAN)
+            list(APPEND QUIC_COMMON_FLAGS -fsanitize=thread)
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
+        endif()
+
+        if (QUIC_ENABLE_EXTRA_SANITIZERS)
+            list(APPEND QUIC_COMMON_FLAGS -fsanitize=alignment -fsanitize-address-use-after-scope)
+            # Enable additional sanitizers offered by clang
+            if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+                list(APPEND QUIC_COMMON_FLAGS -fsanitize=unsigned-integer-overflow -fsanitize=local-bounds -fsanitize=integer -fsanitize=nullability)
+            endif()
         endif()
     endif()
 
@@ -659,26 +782,110 @@ else() #!WIN32
     set(QUIC_CXX_FLAGS ${QUIC_COMMON_FLAGS})
 endif()
 
-if(QUIC_TLS STREQUAL "openssl" OR  QUIC_TLS STREQUAL "openssl3")
+if(QUIC_TLS_LIB STREQUAL "quictls" OR QUIC_TLS_LIB STREQUAL "openssl")
     add_library(OpenSSL INTERFACE)
 
-    include(FetchContent)
+    # OpenSSL versions before 3.5.0 do not expose these APIs.
+    if(QUIC_TLS_LIB STREQUAL "quictls" AND (QUIC_USE_EXTERNAL_OPENSSL OR QUIC_OPENSSL_INCLUDE_DIR OR QUIC_OPENSSL_LIB_DIR OR QUIC_OPENSSL_ROOT_DIR))
+        message(FATAL_ERROR "Manual OpenSSL selection is not supported with the 'quictls'. 'quictls' must be built from submodules to ensure static linkage with required QUIC APIs. Use 'openssl' provider for external 3.5.0+ OpenSSL.")
+    endif()
 
-    FetchContent_Declare(
-        OpenSSLQuic
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/submodules
-        CMAKE_ARGS "-DQUIC_USE_SYSTEM_LIBCRYPTO=${QUIC_USE_SYSTEM_LIBCRYPTO}"
-    )
-    FetchContent_MakeAvailable(OpenSSLQuic)
+    # Only 'openssl' provider supports external selection for now
+    if(QUIC_TLS_LIB STREQUAL "openssl" AND (QUIC_USE_EXTERNAL_OPENSSL OR QUIC_OPENSSL_INCLUDE_DIR OR QUIC_OPENSSL_LIB_DIR OR QUIC_OPENSSL_ROOT_DIR))
+        add_library(OpenSSLQuic INTERFACE)
+        if(QUIC_OPENSSL_INCLUDE_DIR AND QUIC_OPENSSL_LIB_DIR)
+            target_include_directories(OpenSSLQuic INTERFACE ${QUIC_OPENSSL_INCLUDE_DIR})
+            if(BUILD_SHARED_LIBS)
+                find_library(LIB_CRYPTO NAMES crypto libcrypto PATHS ${QUIC_OPENSSL_LIB_DIR} NO_DEFAULT_PATH)
+                find_library(LIB_SSL NAMES ssl libssl PATHS ${QUIC_OPENSSL_LIB_DIR} NO_DEFAULT_PATH)
+            else()
+                find_library(LIB_CRYPTO NAMES "crypto${CMAKE_STATIC_LIBRARY_SUFFIX}" "libcrypto${CMAKE_STATIC_LIBRARY_SUFFIX}" PATHS ${QUIC_OPENSSL_LIB_DIR} NO_DEFAULT_PATH)
+                find_library(LIB_SSL NAMES "ssl${CMAKE_STATIC_LIBRARY_SUFFIX}" "libssl${CMAKE_STATIC_LIBRARY_SUFFIX}" PATHS ${QUIC_OPENSSL_LIB_DIR} NO_DEFAULT_PATH)
+            endif()
+            if(NOT LIB_CRYPTO)
+                message(FATAL_ERROR "libcrypto not found in ${QUIC_OPENSSL_LIB_DIR}")
+            endif()
+            if(NOT LIB_SSL)
+                message(FATAL_ERROR "libssl not found in ${QUIC_OPENSSL_LIB_DIR}")
+            endif()
+            target_link_libraries(OpenSSLQuic INTERFACE ${LIB_SSL} ${LIB_CRYPTO})
+        elseif(QUIC_OPENSSL_INCLUDE_DIR OR QUIC_OPENSSL_LIB_DIR)
+            message(FATAL_ERROR "Both QUIC_OPENSSL_INCLUDE_DIR and QUIC_OPENSSL_LIB_DIR must be set to select custom OpenSSL version.")
+        else()
+            if(QUIC_OPENSSL_ROOT_DIR)
+                set(OPENSSL_ROOT_DIR "${QUIC_OPENSSL_ROOT_DIR}")
+            endif()
+            if(NOT BUILD_SHARED_LIBS)
+                set(OPENSSL_USE_STATIC_LIBS TRUE)
+            endif()
+            find_package(OpenSSL 3.5.0 REQUIRED)
+            # OpenSSL::SSL and OpenSSL::Crypto imported targets propagate transitive dependencies
+            # (for example zstd). BUILD_SHARED_LIBS is OFF and those transitive static libs can be linked again via
+            # src/platform/CMakeLists.txt, causing duplicate/static link failures.
+            # Keep link ownership consistent to avoid duplicate transitive linkage.
+            target_include_directories(OpenSSLQuic INTERFACE ${OPENSSL_INCLUDE_DIR})
+            target_link_libraries(OpenSSLQuic INTERFACE ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
+        endif()
+        add_library(MsQuic::OpenSSL ALIAS OpenSSLQuic)
+    else()
+        include(FetchContent)
 
-    target_link_libraries(OpenSSL
-        INTERFACE
-        OpenSSLQuic::OpenSSLQuic
-    )
+        FetchContent_Declare(
+            OpenSSLQuic
+            SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/submodules
+            CMAKE_ARGS "-DQUIC_USE_SYSTEM_LIBCRYPTO=${QUIC_USE_SYSTEM_LIBCRYPTO}"
+        )
+        FetchContent_MakeAvailable(OpenSSLQuic)
+    endif()
+
+    # Optional: namespace-prefix the bundled OpenSSL symbols so the resulting
+    # binary can coexist with another OpenSSL copy loaded into the same
+    # process. See docs/OpenSSLSymbolPrefix.md for motivation and caveats.
+    if(NOT "${QUIC_OPENSSL_SYMBOL_PREFIX}" STREQUAL "")
+        if(NOT CX_PLATFORM STREQUAL "linux")
+            message(FATAL_ERROR "QUIC_OPENSSL_SYMBOL_PREFIX is only supported on Linux today (got CX_PLATFORM=${CX_PLATFORM}).")
+        endif()
+        if(QUIC_USE_EXTERNAL_OPENSSL OR QUIC_OPENSSL_INCLUDE_DIR OR QUIC_OPENSSL_LIB_DIR OR QUIC_OPENSSL_ROOT_DIR)
+            message(FATAL_ERROR "QUIC_OPENSSL_SYMBOL_PREFIX requires the bundled OpenSSL build; do not combine with QUIC_USE_EXTERNAL_OPENSSL / QUIC_OPENSSL_INCLUDE_DIR / QUIC_OPENSSL_LIB_DIR / QUIC_OPENSSL_ROOT_DIR.")
+        endif()
+        if(QUIC_USE_SYSTEM_LIBCRYPTO)
+            message(FATAL_ERROR "QUIC_OPENSSL_SYMBOL_PREFIX is incompatible with QUIC_USE_SYSTEM_LIBCRYPTO; the system libcrypto cannot be renamed.")
+        endif()
+        # Block the shared-lib install path until the prefixed archives are
+        # wired into install(EXPORT). The prefixed target is INTERFACE IMPORTED
+        # GLOBAL and cannot be installed via install(TARGETS); a shared-lib
+        # install would either fail or produce a package that references
+        # build-tree-only paths under ${CMAKE_BINARY_DIR}/openssl-prefixed/.
+        # Static-lib consumers (the primary use case) are unaffected.
+        if(BUILD_SHARED_LIBS)
+            message(FATAL_ERROR "QUIC_OPENSSL_SYMBOL_PREFIX is currently only supported with BUILD_SHARED_LIBS=OFF (the shared-lib install path does not yet handle the prefixed imported target).")
+        endif()
+
+        include(PrefixOpenSSLArchives)
+        prefix_openssl_archives(
+            PREFIX        "${QUIC_OPENSSL_SYMBOL_PREFIX}"
+            INPUT_TARGET  OpenSSLQuic
+            OUTPUT_TARGET OpenSSLQuicPrefixed
+        )
+
+        target_link_libraries(OpenSSL
+            INTERFACE
+            OpenSSLQuicPrefixed
+        )
+    else()
+        target_link_libraries(OpenSSL
+            INTERFACE
+            MsQuic::OpenSSL
+        )
+    endif()
 endif()
 
 if (QUIC_USE_SYSTEM_LIBCRYPTO)
     list(APPEND QUIC_COMMON_DEFINES CXPLAT_SYSTEM_CRYPTO)
+endif()
+
+if (QUIC_LINUX_IOURING_ENABLED)
+    list(APPEND QUIC_COMMON_DEFINES CXPLAT_USE_IO_URING)
 endif()
 
 if(QUIC_CODE_CHECK)
@@ -705,6 +912,7 @@ if(QUIC_CODE_CHECK)
             -cert-err33-c
             -clang-analyzer-optin.core.EnumCastOutOfRange
             -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+            -clang-analyzer-unix.Stream
             -clang-diagnostic-invalid-unevaluated-string
             -clang-diagnostic-microsoft-anon-tag
             -concurrency-mt-unsafe
@@ -735,6 +943,8 @@ if(QUIC_CODE_CHECK)
             -readability-magic-numbers
             -readability-non-const-parameter
             -readability-redundant-casting
+            -readability-math-missing-parentheses
+            -readability-use-concise-preprocessor-directives
         )
         string(REPLACE ";" "," CLANG_TIDY_CHECKS "${CLANG_TIDY_CHECKS}")
         set(CMAKE_C_CLANG_TIDY_AVAILABLE ${CLANGTIDY} -checks=${CLANG_TIDY_CHECKS}
@@ -818,7 +1028,7 @@ if(QUIC_BUILD_TEST)
         target_compile_options(gtest_main PRIVATE /guard:cf)
     endif()
 
-    if(WIN32 AND QUIC_ENABLE_SANITIZERS)
+    if(WIN32 AND QUIC_ENABLE_ASAN)
         target_compile_options(gtest PRIVATE /fsanitize=address)
         target_compile_options(gtest_main PRIVATE /fsanitize=address)
         target_compile_definitions(gtest PRIVATE _DISABLE_VECTOR_ANNOTATION)

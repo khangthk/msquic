@@ -30,6 +30,12 @@ TIMECAPS CxPlatTimerCapabilities;
 #endif // TIMERR_NOERROR
 QUIC_TRACE_RUNDOWN_CALLBACK* QuicTraceRundownCallback;
 
+//
+// To determine the OS version, we are going to use RtlGetVersion API
+// since GetVersion call can be shimmed on Win8.1+.
+//
+typedef LONG (WINAPI *FuncRtlGetVersion)(RTL_OSVERSIONINFOW *);
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 void
 CxPlatSystemLoad(
@@ -147,6 +153,9 @@ CxPlatProcessorInfoInit(
         Status = QUIC_STATUS_OUT_OF_MEMORY;
         goto Error;
     }
+    CxPlatZeroMemory(
+        CxPlatProcessorInfo,
+        ActiveProcessorCount * sizeof(CXPLAT_PROCESSOR_INFO));
 
     CXPLAT_DBG_ASSERT(CxPlatProcessorGroupInfo == NULL);
     CxPlatProcessorGroupInfo =
@@ -178,6 +187,8 @@ CxPlatProcessorInfoInit(
                 CxPlatProcessorInfo[Proc].Group = Group;
                 CXPLAT_DBG_ASSERT(Proc - CxPlatProcessorGroupInfo[Group].Offset <= UINT8_MAX);
                 CxPlatProcessorInfo[Proc].Index = (uint8_t)(Proc - CxPlatProcessorGroupInfo[Group].Offset);
+#pragma warning(push)
+#pragma warning(disable:6385) // Reading invalid data from 'CxPlatProcessorInfo' (FALSE POSITIVE)
                 QuicTraceLogInfo(
                     ProcessorInfoV3,
                     "[ dll] Proc[%u] Group[%hu] Index[%hhu] Active=%hhu",
@@ -185,6 +196,7 @@ CxPlatProcessorInfoInit(
                     (uint16_t)Group,
                     CxPlatProcessorInfo[Proc].Index,
                     (uint8_t)!!(CxPlatProcessorGroupInfo[Group].Mask & (1ULL << CxPlatProcessorInfo[Proc].Index)));
+#pragma warning(pop)
                 break;
             }
         }
@@ -241,6 +253,22 @@ CxPlatInitialize(
         Status = QUIC_STATUS_OUT_OF_MEMORY;
         goto Error;
     }
+
+    BOOLEAN SuccessfullySetVersion = FALSE;
+    HMODULE NtDllHandle = LoadLibraryA("ntdll.dll");
+    if (NtDllHandle) {
+        FuncRtlGetVersion VersionFunc = (FuncRtlGetVersion)GetProcAddress(NtDllHandle, "RtlGetVersion");
+        if (VersionFunc) {
+            RTL_OSVERSIONINFOW VersionInfo = {0};
+            VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
+            if ((*VersionFunc)(&VersionInfo) == 0) {
+                CxPlatform.dwBuildNumber = VersionInfo.dwBuildNumber;
+                SuccessfullySetVersion = TRUE;
+            }
+        }
+        FreeLibrary(NtDllHandle);
+    }
+    CXPLAT_DBG_ASSERT(SuccessfullySetVersion); // TODO: Is the assert here enough or is there an appropriate QUIC_STATUS we return?
 
     if (QUIC_FAILED(Status = CxPlatProcessorInfoInit())) {
         QuicTraceEvent(
@@ -431,6 +459,33 @@ CxPlatAlloc(
         return NULL;
     }
 
+    void* Alloc = HeapAlloc(CxPlatform.Heap, HEAP_ZERO_MEMORY, ByteCount + AllocOffset);
+    if (Alloc == NULL) {
+        return NULL;
+    }
+    *((uint32_t*)Alloc) = Tag;
+    return (void*)((uint8_t*)Alloc + AllocOffset);
+#else
+    UNREFERENCED_PARAMETER(Tag);
+    return HeapAlloc(CxPlatform.Heap, HEAP_ZERO_MEMORY, ByteCount);
+#endif
+}
+
+void*
+CxPlatAllocUninitialized(
+    _In_ size_t ByteCount,
+    _In_ uint32_t Tag
+    )
+{
+#ifdef DEBUG
+    CXPLAT_DBG_ASSERT(CxPlatform.Heap);
+    CXPLAT_DBG_ASSERT(ByteCount != 0);
+    uint32_t Rand;
+    if ((CxPlatform.AllocFailDenominator > 0 && (CxPlatRandom(sizeof(Rand), &Rand), Rand % CxPlatform.AllocFailDenominator) == 1) ||
+        (CxPlatform.AllocFailDenominator < 0 && InterlockedIncrement(&CxPlatform.AllocCounter) % CxPlatform.AllocFailDenominator == 0)) {
+        return NULL;
+    }
+
     void* Alloc = HeapAlloc(CxPlatform.Heap, 0, ByteCount + AllocOffset);
     if (Alloc == NULL) {
         return NULL;
@@ -580,17 +635,6 @@ CxPlatGetProcessorGroupInfo(
     }
 
     return QUIC_STATUS_SUCCESS;
-}
-
-void
-CxPlatDatapathSqeInitialize(
-    _Out_ DATAPATH_SQE* DatapathSqe,
-    _In_ uint32_t CqeType
-    )
-{
-    RtlZeroMemory(DatapathSqe, sizeof(*DatapathSqe));
-    DatapathSqe->CqeType = CqeType;
-    DatapathSqe->Sqe.UserData = DatapathSqe;
 }
 
 #ifdef DEBUG

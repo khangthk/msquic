@@ -5,6 +5,8 @@ This regenerates the CLOG sidecar file.
 
 #>
 
+#Requires -Version 7.0
+
 Set-StrictMode -Version 'Latest'
 $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
@@ -31,10 +33,15 @@ if (Test-Path $OutputDir) {
     }
 }
 
+$TmpOutputDir = Join-Path $RootDir "build" "tmp"
+
+# Clean stale generated files so removed/renamed sources don't leave orphans
+if (Test-Path $TmpOutputDir) {
+    Remove-Item $TmpOutputDir -Recurse -Force
+}
+
 $Sidecar = Join-Path $SrcDir "manifest" "clog.sidecar"
 $ConfigFile = Join-Path $SrcDir "manifest" "msquic.clog_config"
-
-$TmpOutputDir = Join-Path $RootDir "build" "tmp"
 $ClogDir = Join-Path $RootDir "build" "clog"
 
 # Create directories
@@ -42,7 +49,7 @@ New-Item -Path $OutputDir -ItemType Directory -Force | Out-Null
 New-Item -Path (Join-Path $OutputDir linux) -ItemType Directory -Force | Out-Null
 
 # Build CLOG, placing results into the CLOG directory under our build directory
-dotnet publish ../submodules/clog/src/clog -o ${ClogDir} -f net6.0
+dotnet publish ../submodules/clog/src/clog -o ${ClogDir} -f net8.0
 
 #
 # You may be tempted to delete the sidecar - DO NOT DO THIS - the sidecare
@@ -59,12 +66,22 @@ foreach ($File in $allFiles) {
     $allFiles = $allFiles + " " + $File
 }
 
-# Generate code for all different permutations we need
-Invoke-Expression "${ClogDir}/clog -p windows --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
-Invoke-Expression "${ClogDir}/clog -p windows_kernel --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
-Invoke-Expression "${ClogDir}/clog -p stubs --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
-Invoke-Expression "${ClogDir}/clog -p linux --dynamicTracepointProvider --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory (Join-Path $OutputDir linux) --inputFiles $allFiles"
-Invoke-Expression "${ClogDir}/clog -p macos --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
+#
+# Allow the sidecar to run on a newer .NET version.
+#
+$OriginalDOTNET_ROLL_FORWARD = $env:DOTNET_ROLL_FORWARD
+
+try {
+    $env:DOTNET_ROLL_FORWARD = "Major"
+    # Generate code for all different permutations we need
+    Invoke-Expression "${ClogDir}/clog -p windows --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
+    Invoke-Expression "${ClogDir}/clog -p windows_kernel --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
+    Invoke-Expression "${ClogDir}/clog -p stubs --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
+    Invoke-Expression "${ClogDir}/clog -p linux --dynamicTracepointProvider --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory (Join-Path $OutputDir linux) --inputFiles $allFiles"
+    Invoke-Expression "${ClogDir}/clog -p macos --scopePrefix quic.clog -s $Sidecar -c $ConfigFile --outputDirectory $TmpOutputDir --inputFiles $allFiles"
+} finally {
+    $env:DOTNET_ROLL_FORWARD = $OriginalDOTNET_ROLL_FORWARD
+}
 
 # Return to where we started
 Set-Location $OrigDir

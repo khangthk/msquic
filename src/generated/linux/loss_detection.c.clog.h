@@ -18,6 +18,10 @@
 #define _clog_MACRO_QuicTraceLogVerbose  1
 #define QuicTraceLogVerbose(a, ...) _clog_CAT(_clog_ARGN_SELECTOR(__VA_ARGS__), _clog_CAT(_,a(#a, __VA_ARGS__)))
 #endif
+#ifndef _clog_MACRO_QuicTraceLogConnError
+#define _clog_MACRO_QuicTraceLogConnError  1
+#define QuicTraceLogConnError(a, ...) _clog_CAT(_clog_ARGN_SELECTOR(__VA_ARGS__), _clog_CAT(_,a(#a, __VA_ARGS__)))
+#endif
 #ifndef _clog_MACRO_QuicTraceLogConnInfo
 #define _clog_MACRO_QuicTraceLogConnInfo  1
 #define QuicTraceLogConnInfo(a, ...) _clog_CAT(_clog_ARGN_SELECTOR(__VA_ARGS__), _clog_CAT(_,a(#a, __VA_ARGS__)))
@@ -242,6 +246,30 @@ tracepoint(CLOG_LOSS_DETECTION_C, PacketTxProbeRetransmit , arg2, arg3);\
 
 
 /*----------------------------------------------------------
+// Decoder Ring for AttackDetected
+// [conn][%p] Attack detected: Skipped packet number %llu ACKed in range [%llu, %llu]
+// QuicTraceLogConnError(
+                AttackDetected,
+                Connection,
+                "Attack detected: Skipped packet number %llu ACKed in range [%llu, %llu]",
+                Connection->Send.SkippedPacketNumber,
+                AckBlock->Low,
+                QuicRangeGetHigh(AckBlock));
+// arg1 = arg1 = Connection = arg1
+// arg3 = arg3 = Connection->Send.SkippedPacketNumber = arg3
+// arg4 = arg4 = AckBlock->Low = arg4
+// arg5 = arg5 = QuicRangeGetHigh(AckBlock) = arg5
+----------------------------------------------------------*/
+#ifndef _clog_6_ARGS_TRACE_AttackDetected
+#define _clog_6_ARGS_TRACE_AttackDetected(uniqueId, arg1, encoded_arg_string, arg3, arg4, arg5)\
+tracepoint(CLOG_LOSS_DETECTION_C, AttackDetected , arg1, arg3, arg4, arg5);\
+
+#endif
+
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for HandshakeConfirmedAck
 // [conn][%p] Handshake confirmed (ack)
 // QuicTraceLogConnInfo(
@@ -273,26 +301,6 @@ tracepoint(CLOG_LOSS_DETECTION_C, HandshakeConfirmedAck , arg1);\
 #ifndef _clog_4_ARGS_TRACE_PathMinMtuValidated
 #define _clog_4_ARGS_TRACE_PathMinMtuValidated(uniqueId, arg1, encoded_arg_string, arg3)\
 tracepoint(CLOG_LOSS_DETECTION_C, PathMinMtuValidated , arg1, arg3);\
-
-#endif
-
-
-
-
-/*----------------------------------------------------------
-// Decoder Ring for PathValidationTimeout
-// [conn][%p] Path[%hhu] validation timed out
-// QuicTraceLogConnInfo(
-                        PathValidationTimeout,
-                        Connection,
-                        "Path[%hhu] validation timed out",
-                        Path->ID);
-// arg1 = arg1 = Connection = arg1
-// arg3 = arg3 = Path->ID = arg3
-----------------------------------------------------------*/
-#ifndef _clog_4_ARGS_TRACE_PathValidationTimeout
-#define _clog_4_ARGS_TRACE_PathValidationTimeout(uniqueId, arg1, encoded_arg_string, arg3)\
-tracepoint(CLOG_LOSS_DETECTION_C, PathValidationTimeout , arg1, arg3);\
 
 #endif
 

@@ -2,6 +2,28 @@
 
 
 /*----------------------------------------------------------
+// Decoder Ring for GetTxOffloadConfig
+// [ lib] %u, %u
+// QuicTraceLogInfo(
+        GetTxOffloadConfig,
+        "[ lib] %u, %u",
+        Queue->Interface->ActualIfIndex, *TxChecksumOffload);
+// arg2 = arg2 = Queue->Interface->ActualIfIndex = arg2
+// arg3 = arg3 = *TxChecksumOffload = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, GetTxOffloadConfig,
+    TP_ARGS(
+        unsigned int, arg2,
+        unsigned int, arg3), 
+    TP_FIELDS(
+        ctf_integer(unsigned int, arg2, arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+    )
+)
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for FoundVF
 // [ xdp][%p] Found NetSvc-VF interfaces. NetSvc IfIdx:%lu, VF IfIdx:%lu
 // QuicTraceLogInfo(
@@ -40,29 +62,6 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, FoundVF,
 // arg3 = arg3 = Interface->QueueCount = arg3
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpInterfaceQueues,
-    TP_ARGS(
-        const void *, arg2,
-        unsigned int, arg3), 
-    TP_FIELDS(
-        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
-        ctf_integer(unsigned int, arg3, arg3)
-    )
-)
-
-
-
-/*----------------------------------------------------------
-// Decoder Ring for XdpInitialize
-// [ xdp][%p] XDP initialized, %u procs
-// QuicTraceLogVerbose(
-        XdpInitialize,
-        "[ xdp][%p] XDP initialized, %u procs",
-        Xdp,
-        Xdp->PartitionCount);
-// arg2 = arg2 = Xdp = arg2
-// arg3 = arg3 = Xdp->PartitionCount = arg3
-----------------------------------------------------------*/
-TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpInitialize,
     TP_ARGS(
         const void *, arg2,
         unsigned int, arg3), 
@@ -132,6 +131,29 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueStart,
 // arg3 = arg3 = QueueCount = arg3
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpWorkerStart,
+    TP_ARGS(
+        const void *, arg2,
+        unsigned int, arg3), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for XdpInitialize
+// [ xdp][%p] XDP initialized, %u procs
+// QuicTraceLogVerbose(
+        XdpInitialize,
+        "[ xdp][%p] XDP initialized, %u procs",
+        Xdp,
+        Xdp->PartitionCount);
+// arg2 = arg2 = Xdp = arg2
+// arg3 = arg3 = Xdp->PartitionCount = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpInitialize,
     TP_ARGS(
         const void *, arg2,
         unsigned int, arg3), 
@@ -261,9 +283,9 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueAsyncIoTx,
 // Decoder Ring for XdpQueueAsyncIoRxComplete
 // [ xdp][%p] XDP async IO complete (RX)
 // QuicTraceLogVerbose(
-                XdpQueueAsyncIoRxComplete,
-                "[ xdp][%p] XDP async IO complete (RX)",
-                Queue);
+        XdpQueueAsyncIoRxComplete,
+        "[ xdp][%p] XDP async IO complete (RX)",
+        Queue);
 // arg2 = arg2 = Queue = arg2
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueAsyncIoRxComplete,
@@ -280,9 +302,9 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueAsyncIoRxComplete,
 // Decoder Ring for XdpQueueAsyncIoTxComplete
 // [ xdp][%p] XDP async IO complete (TX)
 // QuicTraceLogVerbose(
-                XdpQueueAsyncIoTxComplete,
-                "[ xdp][%p] XDP async IO complete (TX)",
-                Queue);
+        XdpQueueAsyncIoTxComplete,
+        "[ xdp][%p] XDP async IO complete (TX)",
+        Queue);
 // arg2 = arg2 = Queue = arg2
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueAsyncIoTxComplete,
@@ -299,9 +321,9 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpQueueAsyncIoTxComplete,
 // Decoder Ring for XdpPartitionShutdownComplete
 // [ xdp][%p] XDP partition shutdown complete
 // QuicTraceLogVerbose(
-            XdpPartitionShutdownComplete,
-            "[ xdp][%p] XDP partition shutdown complete",
-            Partition);
+        XdpPartitionShutdownComplete,
+        "[ xdp][%p] XDP partition shutdown complete",
+        Partition);
 // arg2 = arg2 = Partition = arg2
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpPartitionShutdownComplete,
@@ -309,6 +331,111 @@ TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpPartitionShutdownComplete,
         const void *, arg2), 
     TP_FIELDS(
         ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for XdpMapInsertFailed
+// [ixdp][%p] XdpMapInsert failed for IfIndex=%u, QueueId=%u, XskMap=%p, RxXsk=%p, Hr=0x%x
+// QuicTraceLogVerbose(
+                XdpMapInsertFailed,
+                "[ixdp][%p] XdpMapInsert failed for IfIndex=%u, QueueId=%u, XskMap=%p, RxXsk=%p, Hr=0x%x",
+                Interface,
+                Interface->IfIndex,
+                j,
+                XskMap,
+                Queue->RxXsk,
+                Hr);
+// arg2 = arg2 = Interface = arg2
+// arg3 = arg3 = Interface->IfIndex = arg3
+// arg4 = arg4 = j = arg4
+// arg5 = arg5 = XskMap = arg5
+// arg6 = arg6 = Queue->RxXsk = arg6
+// arg7 = arg7 = Hr = arg7
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpMapInsertFailed,
+    TP_ARGS(
+        const void *, arg2,
+        unsigned int, arg3,
+        unsigned int, arg4,
+        const void *, arg5,
+        const void *, arg6,
+        unsigned int, arg7), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+        ctf_integer(unsigned int, arg4, arg4)
+        ctf_integer_hex(uint64_t, arg5, (uint64_t)arg5)
+        ctf_integer_hex(uint64_t, arg6, (uint64_t)arg6)
+        ctf_integer(unsigned int, arg7, arg7)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for XdpMapDeleteFailed
+// [ixdp][%p] XdpMapDelete failed for IfIndex=%u, QueueId=%u, XskMap=%p, RxXsk=%p, Hr=0x%x
+// QuicTraceLogVerbose(
+                            XdpMapDeleteFailed,
+                            "[ixdp][%p] XdpMapDelete failed for IfIndex=%u, QueueId=%u, XskMap=%p, RxXsk=%p, Hr=0x%x",
+                            Interface,
+                            Interface->IfIndex,
+                            k,
+                            XskMap,
+                            Interface->Queues[k].RxXsk,
+                            DeleteHr);
+// arg2 = arg2 = Interface = arg2
+// arg3 = arg3 = Interface->IfIndex = arg3
+// arg4 = arg4 = k = arg4
+// arg5 = arg5 = XskMap = arg5
+// arg6 = arg6 = Interface->Queues[k].RxXsk = arg6
+// arg7 = arg7 = DeleteHr = arg7
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpMapDeleteFailed,
+    TP_ARGS(
+        const void *, arg2,
+        unsigned int, arg3,
+        unsigned int, arg4,
+        const void *, arg5,
+        const void *, arg6,
+        unsigned int, arg7), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+        ctf_integer(unsigned int, arg4, arg4)
+        ctf_integer_hex(uint64_t, arg5, (uint64_t)arg5)
+        ctf_integer_hex(uint64_t, arg6, (uint64_t)arg6)
+        ctf_integer(unsigned int, arg7, arg7)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for XdpMapModeConfigured
+// [ixdp][%p] Map mode configured for IfIndex=%u (MapHandle=%p)
+// QuicTraceLogVerbose(
+            XdpMapModeConfigured,
+            "[ixdp][%p] Map mode configured for IfIndex=%u (MapHandle=%p)",
+            Interface,
+            Interface->IfIndex,
+            XskMap);
+// arg2 = arg2 = Interface = arg2
+// arg3 = arg3 = Interface->IfIndex = arg3
+// arg4 = arg4 = XskMap = arg4
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_DATAPATH_RAW_XDP_WIN_C, XdpMapModeConfigured,
+    TP_ARGS(
+        const void *, arg2,
+        unsigned int, arg3,
+        const void *, arg4), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+        ctf_integer_hex(uint64_t, arg4, (uint64_t)arg4)
     )
 )
 

@@ -2,6 +2,45 @@
 
 
 /*----------------------------------------------------------
+// Decoder Ring for PacketRxVersionNegotiation
+// [C][RX][-] VN
+// QuicTraceLogVerbose(
+        PacketRxVersionNegotiation,
+        "[C][RX][-] VN");
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, PacketRxVersionNegotiation,
+    TP_ARGS(
+), 
+    TP_FIELDS(
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for PacketRxVersionNegVer
+// [C][RX][-]   Ver[%d]: 0x%x
+// QuicTraceLogVerbose(
+            PacketRxVersionNegVer,
+            "[C][RX][-]   Ver[%d]: 0x%x",
+            (int32_t)i,
+            CxPlatByteSwapUint32(ServerVersion));
+// arg2 = arg2 = (int32_t)i = arg2
+// arg3 = arg3 = CxPlatByteSwapUint32(ServerVersion) = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, PacketRxVersionNegVer,
+    TP_ARGS(
+        int, arg2,
+        unsigned int, arg3), 
+    TP_FIELDS(
+        ctf_integer(int, arg2, arg2)
+        ctf_integer(unsigned int, arg3, arg3)
+    )
+)
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for PacketRxStatelessReset
 // [S][RX][-] SR %s
 // QuicTraceLogVerbose(
@@ -466,6 +505,37 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, UnreachableInvalid,
 
 
 /*----------------------------------------------------------
+// Decoder Ring for ExportKeyingMaterialInvalidState
+// [conn][%p] Cannot export keying material [Connected=%hhu, HandshakeComplete=%hhu, HasTls=%hhu]
+// QuicTraceLogConnWarning(
+            ExportKeyingMaterialInvalidState,
+            Connection,
+            "Cannot export keying material [Connected=%hhu, HandshakeComplete=%hhu, HasTls=%hhu]",
+            Connection->State.Connected,
+            Connection->Crypto.TlsState.HandshakeComplete,
+            (uint8_t)(Connection->Crypto.TLS != NULL));
+// arg1 = arg1 = Connection = arg1
+// arg3 = arg3 = Connection->State.Connected = arg3
+// arg4 = arg4 = Connection->Crypto.TlsState.HandshakeComplete = arg4
+// arg5 = arg5 = (uint8_t)(Connection->Crypto.TLS != NULL) = arg5
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, ExportKeyingMaterialInvalidState,
+    TP_ARGS(
+        const void *, arg1,
+        unsigned char, arg3,
+        unsigned char, arg4,
+        unsigned char, arg5), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
+        ctf_integer(unsigned char, arg3, arg3)
+        ctf_integer(unsigned char, arg4, arg4)
+        ctf_integer(unsigned char, arg5, arg5)
+    )
+)
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for CloseComplete
 // [conn][%p] Connection close complete
 // QuicTraceLogConnInfo(
@@ -761,10 +831,10 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, Unreachable,
 // Decoder Ring for FailedRouteResolution
 // [conn][%p] Route resolution failed on Path[%hhu]. Switching paths...
 // QuicTraceLogConnInfo(
-                    FailedRouteResolution,
-                    Connection,
-                    "Route resolution failed on Path[%hhu]. Switching paths...",
-                    PathId);
+            FailedRouteResolution,
+            Connection,
+            "Route resolution failed on Path[%hhu]. Switching paths...",
+            PathId);
 // arg1 = arg1 = Connection = arg1
 // arg3 = arg3 = PathId = arg3
 ----------------------------------------------------------*/
@@ -873,27 +943,58 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, LocalInterfaceSet,
 
 
 /*----------------------------------------------------------
-// Decoder Ring for CibirIdSet
-// [conn][%p] CIBIR ID set (len %hhu, offset %hhu)
+// Decoder Ring for CibirIdSetInfo
+// [conn][%p] CIBIR ID set (len %hhu, offset %hhu, id 0x%llx)
 // QuicTraceLogConnInfo(
-            CibirIdSet,
+            CibirIdSetInfo,
             Connection,
-            "CIBIR ID set (len %hhu, offset %hhu)",
+            "CIBIR ID set (len %hhu, offset %hhu, id 0x%llx)",
             Connection->CibirId[0],
-            Connection->CibirId[1]);
+            Connection->CibirId[1],
+            (unsigned long long)QuicCibirIdToUint64(
+                Connection->CibirId + 2,
+                Connection->CibirId[0]));
 // arg1 = arg1 = Connection = arg1
 // arg3 = arg3 = Connection->CibirId[0] = arg3
 // arg4 = arg4 = Connection->CibirId[1] = arg4
+// arg5 = arg5 = (unsigned long long)QuicCibirIdToUint64(
+                Connection->CibirId + 2,
+                Connection->CibirId[0]) = arg5
 ----------------------------------------------------------*/
-TRACEPOINT_EVENT(CLOG_CONNECTION_C, CibirIdSet,
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, CibirIdSetInfo,
     TP_ARGS(
         const void *, arg1,
         unsigned char, arg3,
-        unsigned char, arg4), 
+        unsigned char, arg4,
+        unsigned long long, arg5), 
     TP_FIELDS(
         ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
         ctf_integer(unsigned char, arg3, arg3)
         ctf_integer(unsigned char, arg4, arg4)
+        ctf_integer(uint64_t, arg5, arg5)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for ConnDscpSet
+// [conn][%p] Connection DSCP set to %hhu
+// QuicTraceLogConnInfo(
+            ConnDscpSet,
+            Connection,
+            "Connection DSCP set to %hhu",
+            Connection->DSCP);
+// arg1 = arg1 = Connection = arg1
+// arg3 = arg3 = Connection->DSCP = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, ConnDscpSet,
+    TP_ARGS(
+        const void *, arg1,
+        unsigned char, arg3), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
+        ctf_integer(unsigned char, arg3, arg3)
     )
 )
 
@@ -1296,52 +1397,6 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, QueueDatagrams,
 
 
 /*----------------------------------------------------------
-// Decoder Ring for RecvVerNeg
-// [conn][%p] Received Version Negotation:
-// QuicTraceLogConnVerbose(
-        RecvVerNeg,
-        Connection,
-        "Received Version Negotation:");
-// arg1 = arg1 = Connection = arg1
-----------------------------------------------------------*/
-TRACEPOINT_EVENT(CLOG_CONNECTION_C, RecvVerNeg,
-    TP_ARGS(
-        const void *, arg1), 
-    TP_FIELDS(
-        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
-    )
-)
-
-
-
-/*----------------------------------------------------------
-// Decoder Ring for VerNegItem
-// [conn][%p]   Ver[%d]: 0x%x
-// QuicTraceLogConnVerbose(
-            VerNegItem,
-            Connection,
-            "  Ver[%d]: 0x%x",
-            (int32_t)i,
-            CxPlatByteSwapUint32(ServerVersion));
-// arg1 = arg1 = Connection = arg1
-// arg3 = arg3 = (int32_t)i = arg3
-// arg4 = arg4 = CxPlatByteSwapUint32(ServerVersion) = arg4
-----------------------------------------------------------*/
-TRACEPOINT_EVENT(CLOG_CONNECTION_C, VerNegItem,
-    TP_ARGS(
-        const void *, arg1,
-        int, arg3,
-        unsigned int, arg4), 
-    TP_FIELDS(
-        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
-        ctf_integer(int, arg3, arg3)
-        ctf_integer(unsigned int, arg4, arg4)
-    )
-)
-
-
-
-/*----------------------------------------------------------
 // Decoder Ring for DeferDatagram
 // [conn][%p] Deferring datagram (type=%hu)
 // QuicTraceLogConnVerbose(
@@ -1603,6 +1658,29 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, DatagramReceiveEnableUpdated,
 // arg3 = arg3 = Connection->State.Disable1RttEncrytion = arg3
 ----------------------------------------------------------*/
 TRACEPOINT_EVENT(CLOG_CONNECTION_C, Disable1RttEncrytionUpdated,
+    TP_ARGS(
+        const void *, arg1,
+        unsigned char, arg3), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg1, (uint64_t)arg1)
+        ctf_integer(unsigned char, arg3, arg3)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for CloseAsyncUpdated
+// [conn][%p] Updated CloseAsync to %hhu
+// QuicTraceLogConnVerbose(
+            CloseAsyncUpdated,
+            Connection,
+            "Updated CloseAsync to %hhu",
+            Connection->State.CloseAsync);
+// arg1 = arg1 = Connection = arg1
+// arg3 = arg3 = Connection->State.CloseAsync = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, CloseAsyncUpdated,
     TP_ARGS(
         const void *, arg1,
         unsigned char, arg3), 
@@ -2015,10 +2093,10 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, ConnEcnCapable,
 
 /*----------------------------------------------------------
 // Decoder Ring for ConnVersionSet
-// [conn][%p] QUIC Version: %u
+// [conn][%p] QUIC Version: 0x%x
 // QuicTraceEvent(
             ConnVersionSet,
-            "[conn][%p] QUIC Version: %u",
+            "[conn][%p] QUIC Version: 0x%x",
             Connection,
             Connection->Stats.QuicVersion);
 // arg2 = arg2 = Connection = arg2
@@ -2416,6 +2494,29 @@ TRACEPOINT_EVENT(CLOG_CONNECTION_C, ConnRecvUdpDatagrams,
         ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
         ctf_integer(unsigned int, arg3, arg3)
         ctf_integer(unsigned int, arg4, arg4)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for ConnPathValidationTimeout
+// [conn][%p] Path[%hhu] validation timed out
+// QuicTraceEvent(
+            ConnPathValidationTimeout,
+            "[conn][%p] Path[%hhu] validation timed out",
+            Connection,
+            Path->ID);
+// arg2 = arg2 = Connection = arg2
+// arg3 = arg3 = Path->ID = arg3
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_CONNECTION_C, ConnPathValidationTimeout,
+    TP_ARGS(
+        const void *, arg2,
+        unsigned char, arg3), 
+    TP_FIELDS(
+        ctf_integer_hex(uint64_t, arg2, (uint64_t)arg2)
+        ctf_integer(unsigned char, arg3, arg3)
     )
 )
 

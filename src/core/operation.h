@@ -63,8 +63,15 @@ typedef enum QUIC_API_TYPE {
     QUIC_API_TYPE_DATAGRAM_SEND,
     QUIC_API_TYPE_CONN_COMPLETE_RESUMPTION_TICKET_VALIDATION,
     QUIC_API_TYPE_CONN_COMPLETE_CERTIFICATE_VALIDATION,
+    QUIC_API_TYPE_STRM_PROVIDE_RECV_BUFFERS,
+    QUIC_API_TYPE_CONN_EXPORT_KEYING_MATERIAL,
 
 } QUIC_API_TYPE;
+
+typedef enum QUIC_CONN_START_FLAGS {
+    QUIC_CONN_START_FLAG_NONE =              0x00000000U,
+    QUIC_CONN_START_FLAG_FAIL_SILENTLY =     0x00000001U // Don't send notification to API client
+} QUIC_CONN_START_FLAGS;
 
 //
 // Context for an API call. This is allocated separately from QUIC_OPERATION
@@ -107,6 +114,7 @@ typedef struct QUIC_API_CONTEXT {
             const char* ServerName;
             uint16_t ServerPort;
             QUIC_ADDRESS_FAMILY Family;
+            QUIC_CONN_START_FLAGS Flags;
         } CONN_START;
         struct {
             QUIC_CONFIGURATION* Configuration;
@@ -154,6 +162,10 @@ typedef struct QUIC_API_CONTEXT {
             QUIC_STREAM* Stream;
             BOOLEAN IsEnabled;
         } STRM_RECV_SET_ENABLED;
+        struct {
+            QUIC_STREAM* Stream;
+            CXPLAT_LIST_ENTRY /* QUIC_RECV_CHUNK */ Chunks;
+        } STRM_PROVIDE_RECV_BUFFERS;
 
         struct {
             HQUIC Handle;
@@ -167,6 +179,11 @@ typedef struct QUIC_API_CONTEXT {
             uint32_t* BufferLength;
             void* Buffer;
         } GET_PARAM;
+        struct {
+            const QUIC_KEYING_MATERIAL_CONFIG* Config;
+            _Field_size_bytes_(Config->OutputLength)
+                uint8_t* Output;
+        } CONN_EXPORT_KEYING_MATERIAL;
     };
 
 } QUIC_API_CONTEXT;
@@ -179,6 +196,7 @@ typedef enum QUIC_CONN_TIMER_TYPE {
     QUIC_CONN_TIMER_KEEP_ALIVE,
     QUIC_CONN_TIMER_IDLE,
     QUIC_CONN_TIMER_SHUTDOWN,
+    QUIC_CONN_TIMER_PATH_VALIDATION,
 
     QUIC_CONN_TIMER_COUNT
 
@@ -212,6 +230,11 @@ typedef struct QUIC_OPERATION {
     // QuicOperationAlloc should be freed with QuicOperationFree.
     //
     BOOLEAN FreeAfterProcess;
+
+    //
+    // Timestamp (us) when the operation was enqueued.
+    //
+    uint32_t QueueTimeUs;
 
     union {
         struct {
@@ -247,7 +270,7 @@ typedef struct QUIC_OPERATION {
 
 } QUIC_OPERATION;
 
-inline
+QUIC_INLINE
 _IRQL_requires_max_(DISPATCH_LEVEL)
 void
 QuicOperLog(
@@ -324,7 +347,7 @@ QuicOperationQueueUninitialize(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 QUIC_OPERATION*
 QuicOperationAlloc(
-    _In_ QUIC_WORKER* Worker,
+    _In_ QUIC_PARTITION* Partition,
     _In_ QUIC_OPERATION_TYPE Type
     );
 
@@ -334,7 +357,6 @@ QuicOperationAlloc(
 _IRQL_requires_max_(PASSIVE_LEVEL)
 void
 QuicOperationFree(
-    _In_ QUIC_WORKER* Worker,
     _In_ QUIC_OPERATION* Oper
     );
 
@@ -342,7 +364,7 @@ QuicOperationFree(
 // Returns TRUE if the operation queue has priority operations queued.
 //
 _IRQL_requires_max_(DISPATCH_LEVEL)
-inline
+QUIC_INLINE
 BOOLEAN
 QuicOperationHasPriority(
     _In_ QUIC_OPERATION_QUEUE* OperQ
@@ -362,6 +384,7 @@ _IRQL_requires_max_(DISPATCH_LEVEL)
 BOOLEAN
 QuicOperationEnqueue(
     _In_ QUIC_OPERATION_QUEUE* OperQ,
+    _In_ QUIC_PARTITION* Partition,
     _In_ QUIC_OPERATION* Oper
     );
 
@@ -374,6 +397,7 @@ _IRQL_requires_max_(DISPATCH_LEVEL)
 BOOLEAN
 QuicOperationEnqueuePriority(
     _In_ QUIC_OPERATION_QUEUE* OperQ,
+    _In_ QUIC_PARTITION* Partition,
     _In_ QUIC_OPERATION* Oper
     );
 
@@ -385,6 +409,7 @@ _IRQL_requires_max_(DISPATCH_LEVEL)
 BOOLEAN
 QuicOperationEnqueueFront(
     _In_ QUIC_OPERATION_QUEUE* OperQ,
+    _In_ QUIC_PARTITION* Partition,
     _In_ QUIC_OPERATION* Oper
     );
 
@@ -394,7 +419,8 @@ QuicOperationEnqueueFront(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 QUIC_OPERATION*
 QuicOperationDequeue(
-    _In_ QUIC_OPERATION_QUEUE* OperQ
+    _In_ QUIC_OPERATION_QUEUE* OperQ,
+    _In_ QUIC_PARTITION* Partition
     );
 
 //
@@ -403,6 +429,6 @@ QuicOperationDequeue(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 void
 QuicOperationQueueClear(
-    _In_ QUIC_WORKER* Worker,
-    _In_ QUIC_OPERATION_QUEUE* OperQ
+    _In_ QUIC_OPERATION_QUEUE* OperQ,
+    _In_ QUIC_PARTITION* Partition
     );

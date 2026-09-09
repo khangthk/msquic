@@ -25,6 +25,9 @@ Environment:
 #include <ntstatus.h>
 #include <basetsd.h>
 #include <netioddk.h>
+#include <ntintsafe.h>
+
+#define QUIC_INLINE inline
 
 typedef INT8 int8_t;
 typedef INT16 int16_t;
@@ -98,6 +101,7 @@ typedef UINT64 uint64_t;
 #define QUIC_STATUS_INVALID_STATE           STATUS_INVALID_DEVICE_STATE         // 0xc0000184
 #define QUIC_STATUS_NOT_SUPPORTED           STATUS_NOT_SUPPORTED                // 0xc00000bb
 #define QUIC_STATUS_NOT_FOUND               STATUS_NOT_FOUND                    // 0xc0000225
+#define QUIC_STATUS_FILE_NOT_FOUND          QUIC_STATUS_NOT_FOUND               // 0xc0000225
 #define QUIC_STATUS_BUFFER_TOO_SMALL        STATUS_BUFFER_TOO_SMALL             // 0xc0000023
 #define QUIC_STATUS_HANDSHAKE_FAILURE       STATUS_QUIC_HANDSHAKE_FAILURE       // 0xc0240000
 #define QUIC_STATUS_ABORTED                 STATUS_CANCELLED                    // 0xc0000120
@@ -141,6 +145,7 @@ typedef UINT64 uint64_t;
 
 typedef ADDRESS_FAMILY QUIC_ADDRESS_FAMILY;
 typedef SOCKADDR_INET QUIC_ADDR;
+typedef HANDLE QUIC_XDP_MAP_HANDLE;
 
 #define QUIC_ADDR_V4_PORT_OFFSET        FIELD_OFFSET(SOCKADDR_IN, sin_port)
 #define QUIC_ADDR_V4_IP_OFFSET          FIELD_OFFSET(SOCKADDR_IN, sin_addr)
@@ -152,7 +157,7 @@ typedef SOCKADDR_INET QUIC_ADDR;
 #define QUIC_ADDRESS_FAMILY_INET AF_INET
 #define QUIC_ADDRESS_FAMILY_INET6 AF_INET6
 
-inline
+QUIC_INLINE
 BOOLEAN
 QuicAddrIsValid(
     _In_ const QUIC_ADDR* const Addr
@@ -164,7 +169,7 @@ QuicAddrIsValid(
         Addr->si_family == QUIC_ADDRESS_FAMILY_INET6;
 }
 
-inline
+QUIC_INLINE
 BOOLEAN
 QuicAddrCompareIp(
     _In_ const QUIC_ADDR* const Addr1,
@@ -178,7 +183,7 @@ QuicAddrCompareIp(
     }
 }
 
-inline
+QUIC_INLINE
 BOOLEAN
 QuicAddrCompare(
     _In_ const QUIC_ADDR* const Addr1,
@@ -192,7 +197,7 @@ QuicAddrCompare(
     return QuicAddrCompareIp(Addr1, Addr2);
 }
 
-inline
+QUIC_INLINE
 BOOLEAN
 QuicAddrIsWildCard(
     _In_ const QUIC_ADDR* const Addr
@@ -209,7 +214,7 @@ QuicAddrIsWildCard(
     }
 }
 
-inline
+QUIC_INLINE
 QUIC_ADDRESS_FAMILY
 QuicAddrGetFamily(
     _In_ const QUIC_ADDR* const Addr
@@ -218,7 +223,7 @@ QuicAddrGetFamily(
     return (QUIC_ADDRESS_FAMILY)Addr->si_family;
 }
 
-inline
+QUIC_INLINE
 void
 QuicAddrSetFamily(
     _Out_ QUIC_ADDR* Addr,
@@ -228,7 +233,7 @@ QuicAddrSetFamily(
     Addr->si_family = (ADDRESS_FAMILY)Family;
 }
 
-inline
+QUIC_INLINE
 uint16_t // Returns in host byte order.
 QuicAddrGetPort(
     _In_ const QUIC_ADDR* const Addr
@@ -237,7 +242,7 @@ QuicAddrGetPort(
     return QuicNetByteSwapShort(Addr->Ipv4.sin_port);
 }
 
-inline
+QUIC_INLINE
 void
 QuicAddrSetPort(
     _Inout_ QUIC_ADDR* Addr,
@@ -247,16 +252,18 @@ QuicAddrSetPort(
     Addr->Ipv4.sin_port = QuicNetByteSwapShort(Port);
 }
 
-inline
+QUIC_INLINE
 void
 QuicAddrSetToLoopback(
     _Inout_ QUIC_ADDR* Addr
     )
 {
     if (Addr->si_family == QUIC_ADDRESS_FAMILY_INET) {
+        Addr->Ipv4.sin_addr.s_addr = 0UL;
         Addr->Ipv4.sin_addr.S_un.S_un_b.s_b1 = 127;
         Addr->Ipv4.sin_addr.S_un.S_un_b.s_b4 = 1;
     } else {
+        memset(&Addr->Ipv6.sin6_addr, 0, sizeof(Addr->Ipv6.sin6_addr));
         Addr->Ipv6.sin6_addr.u.Byte[15] = 1;
     }
 }
@@ -264,7 +271,7 @@ QuicAddrSetToLoopback(
 //
 // Test only API to increment the IP address value.
 //
-inline
+QUIC_INLINE
 void
 QuicAddrIncrement(
     _Inout_ QUIC_ADDR* Addr
@@ -277,7 +284,7 @@ QuicAddrIncrement(
     }
 }
 
-inline
+QUIC_INLINE
 uint32_t
 QuicAddrHash(
     _In_ const QUIC_ADDR* Addr
@@ -303,7 +310,7 @@ QuicAddrHash(
 
 #define QUIC_LOCALHOST_FOR_AF(Af) "localhost"
 
-inline
+QUIC_INLINE
 BOOLEAN
 QuicAddrFromString(
     _In_z_ const char* AddrStr,
@@ -324,14 +331,63 @@ QuicAddrFromString(
     return TRUE;
 }
 
+QUIC_INLINE
+BOOLEAN
+CxPlatIsIpLiteral(
+    _In_z_ const char* AddrStr
+    )
+{
+    const char* Terminator = NULL;
+    IN_ADDR Ipv4Addr = {0};
+    if (RtlIpv4StringToAddressA(AddrStr, TRUE, &Terminator, &Ipv4Addr) == STATUS_SUCCESS &&
+        *Terminator == '\0') {
+        return TRUE;
+    }
+
+    IN6_ADDR Ipv6Addr = {0};
+    if (RtlIpv6StringToAddressA(AddrStr, &Terminator, &Ipv6Addr) == STATUS_SUCCESS &&
+        *Terminator == '\0') {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 //
 // Represents an IP address and (optionally) port number as a string.
 //
 typedef struct QUIC_ADDR_STR {
-    char Address[64];
+    char Address[65];
 } QUIC_ADDR_STR;
 
-inline
+//
+// Formats only the IP literal, excluding the port and IPv6 brackets. For
+// example, an IPv6 address with port 443 is formatted as "2001:db8::1".
+//
+QUIC_INLINE
+BOOLEAN
+QuicAddrIpToString(
+    _In_ const QUIC_ADDR* Addr,
+    _Out_ QUIC_ADDR_STR* AddrStr
+    )
+{
+    AddrStr->Address[0] = '\0';
+    if (Addr->si_family == QUIC_ADDRESS_FAMILY_INET) {
+        RtlIpv4AddressToStringA(&Addr->Ipv4.sin_addr, AddrStr->Address);
+    } else if (Addr->si_family == QUIC_ADDRESS_FAMILY_INET6) {
+        RtlIpv6AddressToStringA(&Addr->Ipv6.sin6_addr, AddrStr->Address);
+    } else {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+//
+// Formats the complete endpoint, including a nonzero port and the brackets
+// required around IPv6 when a port is present. For example, an IPv6 address
+// with port 443 is formatted as "[2001:db8::1]:443".
+//
+QUIC_INLINE
 BOOLEAN
 QuicAddrToString(
     _In_ const QUIC_ADDR* Addr,

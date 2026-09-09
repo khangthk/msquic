@@ -779,6 +779,38 @@ TRACEPOINT_EVENT(CLOG_SETTINGS_C, SettingReliableResetEnabled,
 
 
 /*----------------------------------------------------------
+// Decoder Ring for SettingXdpEnabled
+// [sett] XdpEnabled             = %hhu
+// QuicTraceLogVerbose(SettingXdpEnabled,                  "[sett] XdpEnabled             = %hhu", Settings->XdpEnabled);
+// arg2 = arg2 = Settings->XdpEnabled = arg2
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_SETTINGS_C, SettingXdpEnabled,
+    TP_ARGS(
+        unsigned char, arg2), 
+    TP_FIELDS(
+        ctf_integer(unsigned char, arg2, arg2)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingQTIPEnabled
+// [sett] QTIPEnabled            = %hhu
+// QuicTraceLogVerbose(SettingQTIPEnabled,                 "[sett] QTIPEnabled            = %hhu", Settings->QTIPEnabled);
+// arg2 = arg2 = Settings->QTIPEnabled = arg2
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_SETTINGS_C, SettingQTIPEnabled,
+    TP_ARGS(
+        unsigned char, arg2), 
+    TP_FIELDS(
+        ctf_integer(unsigned char, arg2, arg2)
+    )
+)
+
+
+
+/*----------------------------------------------------------
 // Decoder Ring for SettingOneWayDelayEnabled
 // [sett] OneWayDelayEnabled     = %hhu
 // QuicTraceLogVerbose(SettingOneWayDelayEnabled,          "[sett] OneWayDelayEnabled     = %hhu", Settings->OneWayDelayEnabled);
@@ -869,6 +901,22 @@ TRACEPOINT_EVENT(CLOG_SETTINGS_C, SettingStreamMultiReceiveEnabled,
         unsigned char, arg2), 
     TP_FIELDS(
         ctf_integer(unsigned char, arg2, arg2)
+    )
+)
+
+
+
+/*----------------------------------------------------------
+// Decoder Ring for SettingXdpDisabledInMapMode
+// [ lib] Error: Xdp must be enabled when an XDP map was configured.
+// QuicTraceLogError(
+            SettingXdpDisabledInMapMode,
+            "[ lib] Error: Xdp must be enabled when an XDP map was configured.");
+----------------------------------------------------------*/
+TRACEPOINT_EVENT(CLOG_SETTINGS_C, SettingXdpDisabledInMapMode,
+    TP_ARGS(
+), 
+    TP_FIELDS(
     )
 )
 
